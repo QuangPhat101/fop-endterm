@@ -1,0 +1,12 @@
+## Bất thường: 
+- Nếu đang trong phiên làm việc (chưa đăng xuất) mà có 1 đăng nhập khác xảy ra và thực hiện nhiều thao tác với các tài nguyên
+- thời gian giữa các hoạt động được phân bố quá đều và đều là duy nhất, nếu trong thực tế thì sẽ có độ chênh lệch lớn giữa các khoảng thời gian trong ngày và trong tuần (VD: 10h - 11h có 1000 req, 11h-12h có 100 req)
+- Các hoạt động không có sự chênh lệch lớn, tronng thực tế thì sẽ có độ chênh lệch lớn giữa các hoạt động (như login sẽ phải ít hơn access)
+- Nếu 1 user đã đăng nhập và thành công nhưng chưa đăng xuất mà lại có thêm 1 đăng nhập xảy ra thì sao. 
+- Nếu 1 user đăng xuất và thành công rồi nhưng lại có thêm đăng xuất xảy ra thì sao (đăng xuất rỗng)
+- 1 user sử dụng 1 device tại cùng 1 thời điểm nhưng lại có app và resource khác nhau thì sao, ví dụ: user A, device 1, app 1, resource 1, app 2, resource 2 thì là bất thường
+- 1 user đăng nhập sai nhưng không liên tục trong 1 khoảng thời gian ngắn (VD: 5 lần trong khoảng 1 tuần) (có thể là hacker mỗi ngày chỉ thử đúng 1 mật khẩu)
+- Khoảng thời gian người dùng truy cập chương trình ko hợp lệ (start > end thì sao)
+- Phát hiện bất thường là in ra màn hình chương trình hay là lưu vô file gì 
+- Nếu tất cả lần đăng nhập trước đều ở 1 qg hay vài qg gần nhau, có 1 lần đăng nhập ở vị trí hoàn toàn mới thì bất thường 
+- 1 user dùng 1 device đăng nhập 2 lần hoặc đăng xuất liên tục 2 lần 
