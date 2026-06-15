@@ -1091,7 +1091,7 @@ tbody tr:hover {
       <div class="mark">H</div>
       <div>
         <h1>HALO Security Console</h1>
-        <p class="eyebrow">C++ Engine · High-Performance UI Dashboard</p>
+        <p class="eyebrow"></p>
       </div>
     </div>
     <div class="connection">
@@ -1101,31 +1101,48 @@ tbody tr:hover {
   </header>
 
   <!-- Ingestion Control -->
-  <section class="panel dataset-panel">
-    <label>Nguồn file CSV (trong thư mục data/)
-      <select id="datasetSelect"><option value="">Đang nạp danh sách file...</option></select>
-    </label>
-    <label class="check">
-      <input id="saveCache" type="checkbox" checked>
-      <span>Lưu cache (.dat)</span>
-    </label>
-    <label class="check">
-      <input id="resumeCheckpoint" type="checkbox">
-      <span>Lưu checkpoint</span>
-    </label>
-    <button class="btn" id="loadButton" type="button">Nạp Workspace</button>
-    <div class="import-guide" aria-label="Giải thích chế độ import">
-      <div class="guide-item">
-        <span class="guide-kicker">Cache .dat</span>
-        <span class="guide-text">Giúp đọc nhanh hơn file dữ liệu đã có sẵn file cache .dat.</span>
-      </div>
-      <div class="guide-item">
-        <span class="guide-kicker">Checkpoint</span>
-        <span class="guide-text">Bật để phòng trường hợp bị ngắt giữa chừng nhưng sẽ chậm hơn.</span>
-      </div>
+<section class="panel dataset-panel">
+  <label>
+    Chọn file CSV trong thư mục data/
+    <select id="datasetSelect">
+      <option value="">Đang tải danh sách file...</option>
+    </select>
+  </label>
+
+  <label class="check">
+    <input id="saveCache" type="checkbox" checked>
+    <span>Lưu cache (.dat)</span>
+  </label>
+
+  <label class="check">
+    <input id="resumeCheckpoint" type="checkbox" checked>
+    <span>Lưu checkpoint</span>
+  </label>
+
+  <button class="btn" id="loadButton" type="button">
+    Nạp Workspace
+  </button>
+
+  <div class="import-guide" aria-label="Hướng dẫn import dữ liệu">
+    <div class="guide-item">
+      <span class="guide-kicker">Cache .dat</span>
+      <span class="guide-text">
+        Giúp lần nạp sau nhanh hơn nhưng sẽ giảm tốc độ lần đọc đầu tiên.
+      </span>
     </div>
-    <div class="load-rail" id="loadRail" aria-hidden="true"><span></span></div>
-  </section>
+
+    <div class="guide-item">
+      <span class="guide-kicker">Checkpoint</span>
+      <span class="guide-text">
+        Nên bật khi nạp dữ liệu rất lớn để phòng trường hợp bị gián đoạn nhưng sẽ giảm tốc độ.
+      </span>
+    </div>
+  </div>
+
+  <div class="load-rail" id="loadRail" aria-hidden="true">
+    <span></span>
+  </div>
+</section>
 
   <!-- Consolidated Workspace & Performance Stats Header -->
   <section class="monitor-panel panel" id="monitorPanel">
@@ -1667,7 +1684,11 @@ async function loadDataset() {
     updateStats(d.stats);
 
     $("activeWorkspaceName").textContent = file;
-    $("perfTime").textContent = d.timeMs.toFixed(2) + " ms";
+    let timeText = d.timeMs.toFixed(2) + " ms";
+    if (d.cacheTimeMs && d.cacheTimeMs > 0) {
+      timeText = d.timeMs.toFixed(2) + " ms xử lý dữ liệu + " + d.cacheTimeMs.toFixed(2) + " ms ghi .dat";
+    }
+    $("perfTime").textContent = timeText;
     $("perfMemory").textContent = Number(d.memoryMB || 0).toFixed(2) + " MB";
 
     const isDat = d.loadedFromDat;

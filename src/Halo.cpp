@@ -2,25 +2,183 @@
 
 #include <windows.h>
 
+#include <chrono>
+#include <cstring>
+#include <limits>
+#include <thread>
 #include <utility>
 
-Halo::Halo() {}
+namespace {
+constexpr uint32_t HALO_BINARY_MAGIC = 0x48414C4F;
+constexpr uint32_t HALO_BINARY_VERSION = 2;
+
+class BinaryMappedReader {
+   private:
+    HANDLE fileHandle = INVALID_HANDLE_VALUE;
+    HANDLE mappingHandle = NULL;
+    const unsigned char* begin = nullptr;
+    const unsigned char* cursor = nullptr;
+    const unsigned char* end = nullptr;
+
+   public:
+    explicit BinaryMappedReader(const string& filename) {
+        fileHandle = CreateFileA(filename.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (fileHandle == INVALID_HANDLE_VALUE) {
+            return;
+        }
+
+        LARGE_INTEGER size;
+        if (!GetFileSizeEx(fileHandle, &size) || size.QuadPart < 0 ||
+            static_cast<unsigned long long>(size.QuadPart) >
+                static_cast<unsigned long long>(std::numeric_limits<size_t>::max())) {
+            CloseHandle(fileHandle);
+            fileHandle = INVALID_HANDLE_VALUE;
+            return;
+        }
+
+        mappingHandle = CreateFileMappingA(fileHandle, NULL, PAGE_READONLY, 0, 0, NULL);
+        if (mappingHandle == NULL) {
+            CloseHandle(fileHandle);
+            fileHandle = INVALID_HANDLE_VALUE;
+            return;
+        }
+
+        begin = static_cast<const unsigned char*>(
+            MapViewOfFile(mappingHandle, FILE_MAP_READ, 0, 0, 0));
+        if (begin == nullptr) {
+            CloseHandle(mappingHandle);
+            mappingHandle = NULL;
+            CloseHandle(fileHandle);
+            fileHandle = INVALID_HANDLE_VALUE;
+            return;
+        }
+
+        cursor = begin;
+        end = begin + static_cast<size_t>(size.QuadPart);
+    }
+
+    ~BinaryMappedReader() {
+        if (begin != nullptr) {
+            UnmapViewOfFile(begin);
+        }
+        if (mappingHandle != NULL) {
+            CloseHandle(mappingHandle);
+        }
+        if (fileHandle != INVALID_HANDLE_VALUE) {
+            CloseHandle(fileHandle);
+        }
+    }
+
+    bool isOpen() const {
+        return begin != nullptr;
+    }
+
+    template <typename T>
+    bool readPod(T& out) {
+        return readBytes(&out, sizeof(T));
+    }
+
+    bool readBytes(void* dst, size_t bytes) {
+        if (bytes == 0) {
+            return true;
+        }
+        if (static_cast<size_t>(end - cursor) < bytes) {
+            return false;
+        }
+        std::memcpy(dst, cursor, bytes);
+        cursor += bytes;
+        return true;
+    }
+};
+
+class BinaryFileReader {
+   private:
+    HANDLE fileHandle = INVALID_HANDLE_VALUE;
+
+   public:
+    explicit BinaryFileReader(const string& filename) {
+        fileHandle = CreateFileA(filename.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    }
+
+    ~BinaryFileReader() {
+        if (fileHandle != INVALID_HANDLE_VALUE) {
+            CloseHandle(fileHandle);
+        }
+    }
+
+    bool isOpen() const {
+        return fileHandle != INVALID_HANDLE_VALUE;
+    }
+
+    template <typename T>
+    bool readPod(T& out) {
+        DWORD read = 0;
+        return ReadFile(fileHandle, &out, sizeof(T), &read, NULL) &&
+               read == sizeof(T);
+    }
+
+    bool readBytes(void* dst, size_t bytes) {
+        char* ptr = reinterpret_cast<char*>(dst);
+        DWORD read = 0;
+        while (bytes > 0) {
+            DWORD chunk = bytes > 64ULL * 1024ULL * 1024ULL ? 64U * 1024U * 1024U
+                                                            : static_cast<DWORD>(bytes);
+            if (!ReadFile(fileHandle, ptr, chunk, &read, NULL) || read != chunk) {
+                return false;
+            }
+            ptr += read;
+            bytes -= read;
+        }
+        return true;
+    }
+};
+
+template <typename Getter>
+void buildSingleIndex(const Vector<DataRecords>& recs, size_t recCount,
+                      size_t bucketCount, Vector<int>& offsets,
+                      Vector<int>& recordIndices, Getter getter) {
+    offsets.setSize(bucketCount + 1);
+    for (size_t i = 0; i <= bucketCount; i++) {
+        offsets[i] = 0;
+    }
+
+    for (size_t i = 0; i < recCount; i++) {
+        offsets[static_cast<size_t>(getter(recs[i])) + 1]++;
+    }
+
+    for (size_t i = 1; i <= bucketCount; i++) {
+        offsets[i] += offsets[i - 1];
+    }
+
+    recordIndices.setSize(recCount);
+    Vector<int> cursor = offsets;
+    for (size_t i = 0; i < recCount; i++) {
+        const DataRecords& rec = recs[i];
+        recordIndices[cursor[static_cast<size_t>(getter(rec))]++] =
+            static_cast<int>(i);
+    }
+}
+}  // namespace
+
+Halo::Halo() : users("U"), devices("D"), apps("APP"), resources("R") {}
 
 Halo::~Halo() {
     clearGraphNodes();
 }
 
 void Halo::clearGraphNodes() {
-    for (int i = 0; i < userNodes.size(); i++) {
+    for (size_t i = 0; i < userNodes.size(); i++) {
         delete userNodes[i];
     }
-    for (int i = 0; i < deviceNodes.size(); i++) {
+    for (size_t i = 0; i < deviceNodes.size(); i++) {
         delete deviceNodes[i];
     }
-    for (int i = 0; i < appNodes.size(); i++) {
+    for (size_t i = 0; i < appNodes.size(); i++) {
         delete appNodes[i];
     }
-    for (int i = 0; i < resourceNodes.size(); i++) {
+    for (size_t i = 0; i < resourceNodes.size(); i++) {
         delete resourceNodes[i];
     }
     userNodes.clear();
@@ -100,84 +258,76 @@ string Halo::locationToString(location loc) const {
 }
 
 void Halo::sortQueryResults(Vector<QueryRow>& results) const {
-    if (results.size() > 1) {
-        mergeSort(results, 0, results.size() - 1);
-    }
+    hybridSort(results, [](const QueryRow& a, const QueryRow& b) {
+        return a.timestamp < b.timestamp;
+    });
 }
 
 void Halo::buildIndexes() {
     clearIndexes();
 
-    int recCount = records.size();
-    int userCount = users.size();
-    int deviceCount = devices.size();
-    int resourceCount = resources.size();
-
-    for (int i = 0; i <= userCount; i++) {
-        userOffsets.pushBack(0);
-    }
-    for (int i = 0; i <= deviceCount; i++) {
-        deviceOffsets.pushBack(0);
-    }
-    for (int i = 0; i <= resourceCount; i++) {
-        resourceOffsets.pushBack(0);
-    }
+    size_t recCount = records.size();
+    size_t userCount = users.size();
+    size_t deviceCount = devices.size();
+    size_t resourceCount = resources.size();
 
     const Vector<DataRecords>& recs = records.getRecords();
-    for (int i = 0; i < recCount; i++) {
-        userOffsets[recs[i].userID + 1]++;
-        deviceOffsets[recs[i].deviceID + 1]++;
-        resourceOffsets[recs[i].resourceID + 1]++;
-    }
+    constexpr size_t PARALLEL_INDEX_MIN = 2000000;
+    unsigned int hw = std::thread::hardware_concurrency();
+    bool useParallel = recCount >= PARALLEL_INDEX_MIN && hw >= 4;
 
-    for (int i = 1; i <= userCount; i++) {
-        userOffsets[i] += userOffsets[i - 1];
-    }
-    for (int i = 1; i <= deviceCount; i++) {
-        deviceOffsets[i] += deviceOffsets[i - 1];
-    }
-    for (int i = 1; i <= resourceCount; i++) {
-        resourceOffsets[i] += resourceOffsets[i - 1];
-    }
+    auto buildUser = [&]() {
+        buildSingleIndex(recs, recCount, userCount, userOffsets,
+                         userRecordIndices,
+                         [](const DataRecords& rec) { return rec.userID; });
+    };
+    auto buildDevice = [&]() {
+        buildSingleIndex(recs, recCount, deviceCount, deviceOffsets,
+                         deviceRecordIndices,
+                         [](const DataRecords& rec) { return rec.deviceID; });
+    };
+    auto buildResource = [&]() {
+        buildSingleIndex(recs, recCount, resourceCount, resourceOffsets,
+                         resourceRecordIndices,
+                         [](const DataRecords& rec) { return rec.resourceID; });
+    };
 
-    userRecordIndices.setSize(recCount);
-    deviceRecordIndices.setSize(recCount);
-    resourceRecordIndices.setSize(recCount);
-
-    Vector<int> userCursor = userOffsets;
-    Vector<int> deviceCursor = deviceOffsets;
-    Vector<int> resourceCursor = resourceOffsets;
-
-    for (int i = 0; i < recCount; i++) {
-        const DataRecords& rec = recs[i];
-        userRecordIndices[userCursor[rec.userID]++] = i;
-        deviceRecordIndices[deviceCursor[rec.deviceID]++] = i;
-        resourceRecordIndices[resourceCursor[rec.resourceID]++] = i;
+    if (useParallel) {
+        std::thread t1(buildUser);
+        std::thread t2(buildDevice);
+        std::thread t3(buildResource);
+        t1.join();
+        t2.join();
+        t3.join();
+    } else {
+        buildUser();
+        buildDevice();
+        buildResource();
     }
 
     indexesBuilt = true;
 }
 
-void Halo::processRecord(const DataRecords& newRecord, const string& userId,
-                         const string& deviceId, const string& appId,
-                         const string& resourceId) {
+void Halo::processRecord(const DataRecords& newRecord, std::string_view userId,
+                         std::string_view deviceId, std::string_view appId,
+                         std::string_view resourceId) {
     int uIdx = users.getOrAdd(userId);
     int dIdx = devices.getOrAdd(deviceId);
     int aIdx = apps.getOrAdd(appId);
     int rIdx = resources.getOrAdd(resourceId);
 
     if (buildGraph) {
-        while (userNodes.size() <= uIdx) {
-            userNodes.pushBack(new User(userNodes.size()));
+        while (userNodes.size() <= static_cast<size_t>(uIdx)) {
+            userNodes.pushBack(new User(static_cast<int>(userNodes.size())));
         }
-        while (deviceNodes.size() <= dIdx) {
-            deviceNodes.pushBack(new Device(deviceNodes.size()));
+        while (deviceNodes.size() <= static_cast<size_t>(dIdx)) {
+            deviceNodes.pushBack(new Device(static_cast<int>(deviceNodes.size())));
         }
-        while (appNodes.size() <= aIdx) {
-            appNodes.pushBack(new App(appNodes.size()));
+        while (appNodes.size() <= static_cast<size_t>(aIdx)) {
+            appNodes.pushBack(new App(static_cast<int>(appNodes.size())));
         }
-        while (resourceNodes.size() <= rIdx) {
-            resourceNodes.pushBack(new Resource(resourceNodes.size()));
+        while (resourceNodes.size() <= static_cast<size_t>(rIdx)) {
+            resourceNodes.pushBack(new Resource(static_cast<int>(resourceNodes.size())));
         }
 
         userNodes[uIdx]->connectedDevices.pushBackUnique(dIdx);
@@ -209,17 +359,54 @@ void Halo::clear() {
     skippedRowCount = 0;
     replacedFieldRowCount = 0;
     duplicateMergedCount = 0;
+    finalizeMetrics = FinalizeMetrics();
+}
+
+void Halo::reserveForImport(size_t expectedRecords, size_t expectedUsers,
+                            size_t expectedDevices, size_t expectedApps,
+                            size_t expectedResources) {
+    records.reserve(expectedRecords);
+    if (expectedUsers > 0) {
+        users.reserve(expectedUsers);
+    }
+    if (expectedDevices > 0) {
+        devices.reserve(expectedDevices);
+    }
+    if (expectedApps > 0) {
+        apps.reserve(expectedApps);
+    }
+    if (expectedResources > 0) {
+        resources.reserve(expectedResources);
+    }
 }
 
 void Halo::finalizeLoading() {
-    records.sortRecords();
+    using clock = std::chrono::steady_clock;
+    finalizeMetrics = FinalizeMetrics();
+    auto finalizeStart = clock::now();
+
+    auto sortStart = clock::now();
+    records.sortRecords(sortMode, &finalizeMetrics.sortAlgorithm);
+    finalizeMetrics.sortTimeMs =
+        std::chrono::duration<double, std::milli>(clock::now() - sortStart).count();
+
+    auto dedupStart = clock::now();
     uint64_t merged = records.removeDuplicates();
+    finalizeMetrics.deduplicateTimeMs =
+        std::chrono::duration<double, std::milli>(clock::now() - dedupStart).count();
+
     users.shrinkToFit();
     devices.shrinkToFit();
     apps.shrinkToFit();
     resources.shrinkToFit();
     setDuplicateMerged(merged);
+
+    auto indexStart = clock::now();
     buildIndexes();
+    finalizeMetrics.indexBuildTimeMs =
+        std::chrono::duration<double, std::milli>(clock::now() - indexStart).count();
+    finalizeMetrics.finalizeTimeMs =
+        std::chrono::duration<double, std::milli>(clock::now() - finalizeStart).count();
 }
 
 static bool writeAll(HANDLE hFile, const void* data, unsigned long long bytes) {
@@ -232,20 +419,6 @@ static bool writeAll(HANDLE hFile, const void* data, unsigned long long bytes) {
         }
         ptr += written;
         bytes -= written;
-    }
-    return true;
-}
-
-static bool readAll(HANDLE hFile, void* data, unsigned long long bytes) {
-    char* ptr = reinterpret_cast<char*>(data);
-    DWORD read = 0;
-    while (bytes > 0) {
-        DWORD chunk = bytes > 64ULL * 1024ULL * 1024ULL ? 64U * 1024U * 1024U : (DWORD)bytes;
-        if (!ReadFile(hFile, ptr, chunk, &read, NULL) || read != chunk) {
-            return false;
-        }
-        ptr += read;
-        bytes -= read;
     }
     return true;
 }
@@ -267,13 +440,19 @@ bool Halo::saveToBinary(const string& filename) const {
 
     auto writeNames = [&](const IdTable& table) -> bool {
         const Vector<string>& names = table.getNames();
-        int size = names.size();
+        if (names.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+            return false;
+        }
+        int size = static_cast<int>(names.size());
         if (!writeAll(hFile, &size, sizeof(size))) {
             return false;
         }
         for (int i = 0; i < size; i++) {
             const string& name = names[i];
-            int len = (int)name.length();
+            if (name.length() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+                return false;
+            }
+            int len = static_cast<int>(name.length());
             if (!writeAll(hFile, &len, sizeof(len))) {
                 return false;
             }
@@ -290,7 +469,11 @@ bool Halo::saveToBinary(const string& filename) const {
               writeAll(hFile, &replacedFieldRowCount, sizeof(replacedFieldRowCount)) &&
               writeAll(hFile, &duplicateMergedCount, sizeof(duplicateMergedCount));
 
-    int recSize = records.size();
+    if (records.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        CloseHandle(hFile);
+        return false;
+    }
+    int recSize = static_cast<int>(records.size());
     ok = ok && writeAll(hFile, &recSize, sizeof(recSize));
     if (ok && recSize > 0) {
         const Vector<DataRecords>& recs = records.getRecords();
@@ -302,111 +485,129 @@ bool Halo::saveToBinary(const string& filename) const {
 }
 
 bool Halo::loadFromBinary(const string& filename, bool rebuildGraph) {
-    HANDLE hFile = CreateFileA(filename.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-
-    uint32_t magic = 0;
-    uint32_t version = 0;
-    if (!readAll(hFile, &magic, sizeof(magic)) || magic != 0x48414C4F ||
-        !readAll(hFile, &version, sizeof(version)) || version != 2) {
-        CloseHandle(hFile);
-        return false;
-    }
-
-    clear();
-    auto failAfterClear = [&]() {
-        CloseHandle(hFile);
-        clear();
-        return false;
-    };
-
-    auto readNames = [&](IdTable& table) -> bool {
-        int size = 0;
-        if (!readAll(hFile, &size, sizeof(size)) || size < 0) {
+    auto loadFromReader = [&](auto& reader) -> bool {
+        uint32_t magic = 0;
+        uint32_t version = 0;
+        if (!reader.readPod(magic) || magic != HALO_BINARY_MAGIC ||
+            !reader.readPod(version) || version != HALO_BINARY_VERSION) {
             return false;
         }
-        Vector<string> names;
-        names.reserve(size);
-        for (int i = 0; i < size; i++) {
-            int len = 0;
-            if (!readAll(hFile, &len, sizeof(len)) || len < 0) {
+
+        clear();
+        auto failAfterClear = [&]() {
+            clear();
+            return false;
+        };
+
+        auto readNames = [&](IdTable& table) -> bool {
+            int size = 0;
+            if (!reader.readPod(size) || size < 0) {
                 return false;
             }
-            string name;
-            if (len > 0) {
-                name.resize(len);
-                if (!readAll(hFile, &name[0], len)) {
+            Vector<string> names;
+            names.reserve(static_cast<size_t>(size));
+            for (int i = 0; i < size; i++) {
+                int len = 0;
+                if (!reader.readPod(len) || len < 0) {
                     return false;
                 }
+                string name;
+                if (len > 0) {
+                    name.resize(static_cast<size_t>(len));
+                    if (!reader.readBytes(name.data(), static_cast<size_t>(len))) {
+                        return false;
+                    }
+                }
+                names.pushBack(std::move(name));
             }
-            names.pushBack(name);
+            table.setNames(std::move(names));
+            return true;
+        };
+
+        if (!readNames(users) || !readNames(devices) || !readNames(apps) ||
+            !readNames(resources) || !reader.readPod(totalReadCount) ||
+            !reader.readPod(skippedRowCount) ||
+            !reader.readPod(replacedFieldRowCount) ||
+            !reader.readPod(duplicateMergedCount)) {
+            return failAfterClear();
         }
-        table.setNames(std::move(names));
+
+        int recSize = 0;
+        if (!reader.readPod(recSize) || recSize < 0) {
+            return failAfterClear();
+        }
+
+        Vector<DataRecords> recs;
+        recs.setSize(static_cast<size_t>(recSize));
+        if (recSize > 0 &&
+            !reader.readBytes(recs.rawData(),
+                              static_cast<size_t>(recSize) * sizeof(DataRecords))) {
+            return failAfterClear();
+        }
+        records.setRecords(std::move(recs));
+
+        finalizeMetrics = FinalizeMetrics();
+        auto indexStart = std::chrono::steady_clock::now();
+        buildIndexes();
+        finalizeMetrics.indexBuildTimeMs = std::chrono::duration<double, std::milli>(
+                                              std::chrono::steady_clock::now() - indexStart)
+                                              .count();
+        finalizeMetrics.finalizeTimeMs = finalizeMetrics.indexBuildTimeMs;
+
+        if (!rebuildGraph) {
+            return true;
+        }
+
+        size_t uSize = users.size();
+        size_t dSize = devices.size();
+        size_t aSize = apps.size();
+        size_t rSize = resources.size();
+        userNodes.reserve(uSize);
+        deviceNodes.reserve(dSize);
+        appNodes.reserve(aSize);
+        resourceNodes.reserve(rSize);
+        for (size_t i = 0; i < uSize; i++) {
+            userNodes.pushBack(new User(static_cast<int>(i)));
+        }
+        for (size_t i = 0; i < dSize; i++) {
+            deviceNodes.pushBack(new Device(static_cast<int>(i)));
+        }
+        for (size_t i = 0; i < aSize; i++) {
+            appNodes.pushBack(new App(static_cast<int>(i)));
+        }
+        for (size_t i = 0; i < rSize; i++) {
+            resourceNodes.pushBack(new Resource(static_cast<int>(i)));
+        }
+
+        const Vector<DataRecords>& recsList = records.getRecords();
+        for (size_t i = 0; i < recsList.size(); i++) {
+            const DataRecords& rec = recsList[i];
+            userNodes[rec.userID]->connectedDevices.pushBackUnique(rec.deviceID);
+            deviceNodes[rec.deviceID]->connectedUsers.pushBackUnique(rec.userID);
+            deviceNodes[rec.deviceID]->connectedApps.pushBackUnique(rec.appID);
+            appNodes[rec.appID]->connectedDevices.pushBackUnique(rec.deviceID);
+            appNodes[rec.appID]->connectedResources.pushBackUnique(rec.resourceID);
+            resourceNodes[rec.resourceID]->connectedApps.pushBackUnique(rec.appID);
+        }
+
         return true;
     };
 
-    if (!readNames(users) || !readNames(devices) || !readNames(apps) || !readNames(resources) ||
-        !readAll(hFile, &totalReadCount, sizeof(totalReadCount)) ||
-        !readAll(hFile, &skippedRowCount, sizeof(skippedRowCount)) ||
-        !readAll(hFile, &replacedFieldRowCount, sizeof(replacedFieldRowCount)) ||
-        !readAll(hFile, &duplicateMergedCount, sizeof(duplicateMergedCount))) {
-        return failAfterClear();
+    {
+        BinaryMappedReader mappedReader(filename);
+        if (mappedReader.isOpen()) {
+            if (loadFromReader(mappedReader)) {
+                return true;
+            }
+            return false;
+        }
     }
 
-    int recSize = 0;
-    if (!readAll(hFile, &recSize, sizeof(recSize)) || recSize < 0) {
-        return failAfterClear();
+    BinaryFileReader fileReader(filename);
+    if (!fileReader.isOpen()) {
+        return false;
     }
-
-    Vector<DataRecords> recs;
-    recs.setSize(recSize);
-    if (recSize > 0 && !readAll(hFile, recs.rawData(), (unsigned long long)recSize * sizeof(DataRecords))) {
-        return failAfterClear();
-    }
-    records.setRecords(std::move(recs));
-    CloseHandle(hFile);
-    buildIndexes();
-
-    if (!rebuildGraph) {
-        return true;
-    }
-
-    int uSize = users.size();
-    int dSize = devices.size();
-    int aSize = apps.size();
-    int rSize = resources.size();
-    userNodes.reserve(uSize);
-    deviceNodes.reserve(dSize);
-    appNodes.reserve(aSize);
-    resourceNodes.reserve(rSize);
-    for (int i = 0; i < uSize; i++) {
-        userNodes.pushBack(new User(i));
-    }
-    for (int i = 0; i < dSize; i++) {
-        deviceNodes.pushBack(new Device(i));
-    }
-    for (int i = 0; i < aSize; i++) {
-        appNodes.pushBack(new App(i));
-    }
-    for (int i = 0; i < rSize; i++) {
-        resourceNodes.pushBack(new Resource(i));
-    }
-
-    const Vector<DataRecords>& recsList = records.getRecords();
-    for (int i = 0; i < recsList.size(); i++) {
-        const DataRecords& rec = recsList[i];
-        userNodes[rec.userID]->connectedDevices.pushBackUnique(rec.deviceID);
-        deviceNodes[rec.deviceID]->connectedUsers.pushBackUnique(rec.userID);
-        deviceNodes[rec.deviceID]->connectedApps.pushBackUnique(rec.appID);
-        appNodes[rec.appID]->connectedDevices.pushBackUnique(rec.deviceID);
-        appNodes[rec.appID]->connectedResources.pushBackUnique(rec.resourceID);
-        resourceNodes[rec.resourceID]->connectedApps.pushBackUnique(rec.appID);
-    }
-
-    return true;
+    return loadFromReader(fileReader);
 }
 
 void Halo::queryUserJourney(const string& userId, uint64_t startTime,
@@ -467,14 +668,14 @@ void Halo::queryResourceAccess(const string& resourceId, uint64_t startTime,
 
 void Halo::queryTopResources(uint64_t startTime, uint64_t endTime,
                              Vector<string>& resourceNames, Vector<uint64_t>& accessCounts) const {
-    int totalResources = resources.size();
+    size_t totalResources = resources.size();
     if (totalResources == 0) {
         return;
     }
 
     Vector<uint64_t> counts(totalResources);
     Vector<uint64_t> lastTimestamps(totalResources);
-    for (int i = 0; i < totalResources; i++) {
+    for (size_t i = 0; i < totalResources; i++) {
         counts.pushBack(0);
         lastTimestamps.pushBack(0);
     }
@@ -495,17 +696,18 @@ void Halo::queryTopResources(uint64_t startTime, uint64_t endTime,
         }
     }
 
-    int topK = totalResources < 10 ? totalResources : 10;
+    size_t topK = totalResources < 10 ? totalResources : 10;
     Vector<bool> used(totalResources);
-    for (int i = 0; i < totalResources; i++) {
+    for (size_t i = 0; i < totalResources; i++) {
         used.pushBack(false);
     }
 
-    for (int t = 0; t < topK; t++) {
-        int maxIdx = -1;
+    for (size_t t = 0; t < topK; t++) {
+        size_t maxIdx = 0;
+        bool found = false;
         uint64_t maxCount = 0;
         uint64_t maxLastTimestamp = 0;
-        for (int i = 0; i < totalResources; i++) {
+        for (size_t i = 0; i < totalResources; i++) {
             if (used[i]) {
                 continue;
             }
@@ -514,13 +716,14 @@ void Halo::queryTopResources(uint64_t startTime, uint64_t endTime,
                 maxCount = counts[i];
                 maxIdx = i;
                 maxLastTimestamp = lastTimestamps[i];
+                found = true;
             }
         }
-        if (maxIdx < 0 || maxCount == 0) {
+        if (!found || maxCount == 0) {
             break;
         }
         used[maxIdx] = true;
-        resourceNames.pushBack(resources.getName(maxIdx));
+        resourceNames.pushBack(resources.getName(static_cast<int>(maxIdx)));
         accessCounts.pushBack(maxCount);
     }
 }
@@ -542,7 +745,7 @@ void Halo::appendAnomaly(Vector<AnomalyResult>& results, int maxResults, uint64_
                     << " count=" << count
                     << " detail=" << detail << "\n";
     }
-    if (maxResults >= 0 && results.size() >= maxResults) {
+    if (maxResults >= 0 && results.size() >= static_cast<size_t>(maxResults)) {
         return;
     }
     AnomalyResult row;
@@ -627,11 +830,11 @@ uint64_t Halo::detectAnomalies(const AnomalyParams& params, Vector<AnomalyResult
 
     if (type == "A1") {
         Vector<int> deviceCounts(devices.size());
-        for (int i = 0; i < devices.size(); i++) {
+        for (size_t i = 0; i < devices.size(); i++) {
             deviceCounts.pushBack(0);
         }
         Vector<int> touched;
-        for (int u = 0; u < users.size(); u++) {
+        for (size_t u = 0; u < users.size(); u++) {
             int left = userOffsets[u];
             uint64_t distinct = 0;
             touched.clear();
@@ -663,7 +866,7 @@ uint64_t Halo::detectAnomalies(const AnomalyParams& params, Vector<AnomalyResult
                                   "User logged in from too many distinct devices in window", fullOutput);
                 }
             }
-            for (int i = 0; i < touched.size(); i++) {
+            for (size_t i = 0; i < touched.size(); i++) {
                 deviceCounts[touched[i]] = 0;
             }
         }
@@ -671,7 +874,7 @@ uint64_t Halo::detectAnomalies(const AnomalyParams& params, Vector<AnomalyResult
     }
 
     if (type == "A2" || type == "B1") {
-        for (int u = 0; u < users.size(); u++) {
+        for (size_t u = 0; u < users.size(); u++) {
             uint64_t failed = 0;
             for (int p = userOffsets[u]; p < userOffsets[u + 1]; p++) {
                 const DataRecords& rec = recs[userRecordIndices[p]];
@@ -697,11 +900,11 @@ uint64_t Halo::detectAnomalies(const AnomalyParams& params, Vector<AnomalyResult
 
     if (type == "A3") {
         Vector<int> resourceCounts(resources.size());
-        for (int i = 0; i < resources.size(); i++) {
+        for (size_t i = 0; i < resources.size(); i++) {
             resourceCounts.pushBack(0);
         }
         Vector<int> touched;
-        for (int d = 0; d < devices.size(); d++) {
+        for (size_t d = 0; d < devices.size(); d++) {
             int left = deviceOffsets[d];
             uint64_t distinct = 0;
             touched.clear();
@@ -737,7 +940,7 @@ uint64_t Halo::detectAnomalies(const AnomalyParams& params, Vector<AnomalyResult
                                   "Device accessed too many distinct resources in window", fullOutput);
                 }
             }
-            for (int i = 0; i < touched.size(); i++) {
+            for (size_t i = 0; i < touched.size(); i++) {
                 resourceCounts[touched[i]] = 0;
             }
         }
@@ -745,7 +948,7 @@ uint64_t Halo::detectAnomalies(const AnomalyParams& params, Vector<AnomalyResult
     }
 
     if (type == "A4") {
-        for (int i = 0; i < recs.size(); i++) {
+        for (size_t i = 0; i < recs.size(); i++) {
             const DataRecords& rec = recs[i];
             int64_t local = static_cast<int64_t>(rec.timestamp) +
                             static_cast<int64_t>(timezoneOffsetMinutes(rec.locationTag)) * 60;
@@ -766,7 +969,7 @@ uint64_t Halo::detectAnomalies(const AnomalyParams& params, Vector<AnomalyResult
     }
 
     if (type == "A5") {
-        for (int u = 0; u < users.size(); u++) {
+        for (size_t u = 0; u < users.size(); u++) {
             bool hasPrev = false;
             DataRecords prev;
             for (int p = userOffsets[u]; p < userOffsets[u + 1]; p++) {
@@ -787,7 +990,7 @@ uint64_t Halo::detectAnomalies(const AnomalyParams& params, Vector<AnomalyResult
     }
 
     if (type == "A6") {
-        for (int u = 0; u < users.size(); u++) {
+        for (size_t u = 0; u < users.size(); u++) {
             uint64_t currentDay = 0;
             uint64_t changes = 0;
             location prevLoc = UNKNOWN_LOCATION;
@@ -816,7 +1019,7 @@ uint64_t Halo::detectAnomalies(const AnomalyParams& params, Vector<AnomalyResult
     }
 
     if (type == "A7") {
-        for (int u = 0; u < users.size(); u++) {
+        for (size_t u = 0; u < users.size(); u++) {
             bool active = false;
             DataRecords loginRec;
             for (int p = userOffsets[u]; p < userOffsets[u + 1]; p++) {
@@ -838,7 +1041,7 @@ uint64_t Halo::detectAnomalies(const AnomalyParams& params, Vector<AnomalyResult
     }
 
     if (type == "A8") {
-        for (int u = 0; u < users.size(); u++) {
+        for (size_t u = 0; u < users.size(); u++) {
             int left = userOffsets[u];
             uint64_t loginCount = 0;
             for (int p = userOffsets[u]; p < userOffsets[u + 1]; p++) {
@@ -867,7 +1070,7 @@ uint64_t Halo::detectAnomalies(const AnomalyParams& params, Vector<AnomalyResult
     }
 
     if (type == "A9") {
-        for (int u = 0; u < users.size(); u++) {
+        for (size_t u = 0; u < users.size(); u++) {
             bool inSession = false;
             bool afterAdmin = false;
             uint64_t downloads = 0;
@@ -899,7 +1102,7 @@ uint64_t Halo::detectAnomalies(const AnomalyParams& params, Vector<AnomalyResult
     }
 
     if (type == "B2") {
-        for (int u = 0; u < users.size(); u++) {
+        for (size_t u = 0; u < users.size(); u++) {
             int begin = userOffsets[u];
             int end = userOffsets[u + 1];
             for (int p = begin + 1; p < end; p++) {

@@ -1,8 +1,10 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <ostream>
 #include <string>
+#include <string_view>
 
 #include "GraphNodes.h"
 #include "RecordStorage.h"
@@ -55,6 +57,14 @@ struct AnomalyResult {
     string detail;
 };
 
+struct FinalizeMetrics {
+    double sortTimeMs = 0.0;
+    double deduplicateTimeMs = 0.0;
+    double indexBuildTimeMs = 0.0;
+    double finalizeTimeMs = 0.0;
+    string sortAlgorithm;
+};
+
 class Halo {
    private:
     IdTable users;
@@ -69,11 +79,13 @@ class Halo {
     Vector<App*> appNodes;
     Vector<Resource*> resourceNodes;
     bool buildGraph = false;
+    SortMode sortMode = SortMode::Auto;
 
     uint64_t totalReadCount = 0;
     uint64_t skippedRowCount = 0;
     uint64_t replacedFieldRowCount = 0;
     uint64_t duplicateMergedCount = 0;
+    FinalizeMetrics finalizeMetrics;
 
     Vector<int> userOffsets;
     Vector<int> userRecordIndices;
@@ -87,7 +99,7 @@ class Halo {
     string eventToString(event_Type ev) const;
     string locationToString(location loc) const;
 
-    // Helper: sắp xếp kết quả theo timestamp (merge sort trên Vector<QueryRow>)
+    // Helper: sắp xếp kết quả theo timestamp
     void sortQueryResults(Vector<QueryRow>& results) const;
     void clearGraphNodes();
     void clearIndexes();
@@ -104,15 +116,26 @@ class Halo {
     Halo();
     ~Halo();
 
-    void processRecord(const DataRecords& newRecord, const string& userId,
-                       const string& deviceId, const string& appId,
-                       const string& resourceId);
+    void processRecord(const DataRecords& newRecord, std::string_view userId,
+                       std::string_view deviceId, std::string_view appId,
+                       std::string_view resourceId);
     void setBuildGraph(bool enabled) {
         buildGraph = enabled;
     }
+    void setSortMode(SortMode mode) {
+        sortMode = mode;
+    }
 
     void clear();
+    void reserveForImport(size_t expectedRecords,
+                          size_t expectedUsers = 0,
+                          size_t expectedDevices = 0,
+                          size_t expectedApps = 0,
+                          size_t expectedResources = 0);
     void finalizeLoading();
+    const FinalizeMetrics& getFinalizeMetrics() const {
+        return finalizeMetrics;
+    }
 
     bool saveToBinary(const string& filename) const;
     bool loadFromBinary(const string& filename, bool rebuildGraph = false);
@@ -138,16 +161,16 @@ class Halo {
                              std::ostream* fullOutput = nullptr) const;
 
     // Getter cho thống kê
-    int getUserCount() const {
+    size_t getUserCount() const {
         return users.size();
     }
-    int getDeviceCount() const {
+    size_t getDeviceCount() const {
         return devices.size();
     }
-    int getAppCount() const {
+    size_t getAppCount() const {
         return apps.size();
     }
-    int getResourceCount() const {
+    size_t getResourceCount() const {
         return resources.size();
     }
     uint64_t getRecordCount() const {

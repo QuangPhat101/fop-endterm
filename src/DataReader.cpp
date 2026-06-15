@@ -1,8 +1,10 @@
 #include "DataReader.h"
 
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <iomanip>
+#include <thread>
 #include <windows.h>
 
 #include <string_view>
@@ -11,7 +13,10 @@
 #include "ParseUtils.h"
 
 namespace {
-constexpr int IMPORT_PROGRESS_ROWS = 500000;
+constexpr int IMPORT_PROGRESS_ROWS = 1000000;
+constexpr uint64_t LARGE_FILE_PROGRESS_THRESHOLD = 1ULL * 1024ULL * 1024ULL * 1024ULL;
+constexpr uint64_t PARALLEL_PARSE_FILE_THRESHOLD = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+constexpr int PARALLEL_PARSE_BATCH_ROWS = 65536;
 
 void logImportProgress(const char* phase, int processedRows, int acceptedRows,
                        int maxRows, long long currentOffset, uint64_t fileSize,
@@ -28,8 +33,8 @@ void logImportProgress(const char* phase, int processedRows, int acceptedRows,
     if (fileSize > 0) {
         out << ", " << std::setprecision(1) << percent << "% file";
     }
-    out << ", " << std::setprecision(0) << rowsPerSec << " dong/s";
-    std::cout << out.str() << std::endl;
+    out << ", " << std::setprecision(0) << rowsPerSec << " dong/s\n";
+    std::cout << out.str();
 }
 }  // namespace
 
@@ -103,12 +108,12 @@ class Win32LineReader {
         return currentFilePos - (bufferSize - bufferOffset);
     }
 
-    bool readLine(std::string& line) {
+    bool readLine(std::string_view& line, std::string& scratch) {
         if (eof && bufferOffset >= bufferSize) {
             return false;
         }
 
-        line.clear();
+        scratch.clear();
         while (true) {
             if (bufferOffset >= bufferSize) {
                 DWORD read = 0;
@@ -124,19 +129,41 @@ class Win32LineReader {
                 currentFilePos += read;
             }
 
-            char c = buffer[bufferOffset++];
-            if (c == '\n') {
-                break;
+            const char* start = buffer + bufferOffset;
+            size_t available = static_cast<size_t>(bufferSize - bufferOffset);
+            const char* newline = static_cast<const char*>(std::memchr(start, '\n', available));
+            if (newline != nullptr) {
+                size_t segmentLength = static_cast<size_t>(newline - start);
+                bufferOffset += static_cast<DWORD>(segmentLength + 1);
+                if (scratch.empty()) {
+                    if (segmentLength > 0 && start[segmentLength - 1] == '\r') {
+                        segmentLength--;
+                    }
+                    line = std::string_view(start, segmentLength);
+                    return true;
+                }
+
+                scratch.append(start, segmentLength);
+                if (!scratch.empty() && scratch.back() == '\r') {
+                    scratch.pop_back();
+                }
+                line = scratch;
+                return true;
             }
-            if (c != '\r') {
-                line.push_back(c);
-            }
+
+            scratch.append(start, available);
+            bufferOffset = bufferSize;
         }
-        return !line.empty() || !eof || bufferOffset < bufferSize;
+
+        if (!scratch.empty() && scratch.back() == '\r') {
+            scratch.pop_back();
+        }
+        line = scratch;
+        return !line.empty();
     }
 };
 
-event_Type DataReader::parseEvent(std::string_view evStr, bool& valid) {
+event_Type DataReader::parseEvent(std::string_view evStr, bool& valid) const {
     valid = true;
     if (evStr == "LOGIN") {
         return event_Type::LOGIN;
@@ -166,7 +193,7 @@ event_Type DataReader::parseEvent(std::string_view evStr, bool& valid) {
     return event_Type::UNKNOWN_EVENT;
 }
 
-location DataReader::parseLocation(std::string_view locStr, bool& valid) {
+location DataReader::parseLocation(std::string_view locStr, bool& valid) const {
     valid = true;
     if (locStr == "US") {
         return LOC_US;
@@ -218,7 +245,7 @@ location DataReader::parseLocation(std::string_view locStr, bool& valid) {
 }
 
 int DataReader::splitCSV(std::string_view line, std::string_view* fields,
-                         int maxFields) {
+                         int maxFields) const {
     int count = 0;
     size_t start = 0;
     size_t len = line.length();
@@ -234,7 +261,7 @@ int DataReader::splitCSV(std::string_view line, std::string_view* fields,
     return count;
 }
 
-bool DataReader::isValidId(std::string_view value, std::string_view prefix) {
+bool DataReader::isValidId(std::string_view value, std::string_view prefix) const {
     if (value.size() <= prefix.size()) {
         return false;
     }
@@ -247,7 +274,93 @@ bool DataReader::isValidId(std::string_view value, std::string_view prefix) {
     return halo::parseUint64Strict(value.substr(prefix.size()), ignored);
 }
 
-bool DataReader::processLine(Halo& engine, const std::string& line) {
+void DataReader::parseLineToRow(std::string_view line, ParsedCsvRow& parsed) const {
+    parsed = ParsedCsvRow();
+    if (line.empty()) {
+        return;
+    }
+
+    std::string_view fields[7];
+    parsed.countTotal = true;
+
+    int fieldCount = splitCSV(line, fields, 7);
+    if (fieldCount != 7) {
+        parsed.skipped = true;
+        return;
+    }
+
+    std::string_view userId = fields[0];
+    std::string_view deviceId = fields[1];
+    std::string_view appId = fields[2];
+    std::string_view resourceId = fields[3];
+
+    if (!isValidId(fields[0], "U")) {
+        userId = "UNKNOWN_USER";
+        parsed.replaced = true;
+    }
+
+    if (!isValidId(fields[1], "D")) {
+        deviceId = "UNKNOWN_DEVICE";
+        parsed.replaced = true;
+    }
+
+    if (!isValidId(fields[2], "APP")) {
+        appId = "UNKNOWN_APP";
+        parsed.replaced = true;
+    }
+
+    if (!isValidId(fields[3], "R")) {
+        resourceId = "UNKNOWN_RESOURCE";
+        parsed.replaced = true;
+    }
+
+    bool evValid = true;
+    event_Type ev = parseEvent(fields[4], evValid);
+    if (!evValid || fields[4].empty()) {
+        parsed.replaced = true;
+    }
+
+    bool locValid = true;
+    location loc = parseLocation(fields[5], locValid);
+    if (!locValid || fields[5].empty()) {
+        parsed.replaced = true;
+    }
+
+    uint64_t timestamp = 0;
+    if (!halo::parseUint64Strict(fields[6], timestamp)) {
+        parsed.skipped = true;
+        return;
+    }
+
+    parsed.record.timestamp = timestamp;
+    parsed.record.eventTypeTag = ev;
+    parsed.record.locationTag = loc;
+    parsed.userId.assign(userId.data(), userId.size());
+    parsed.deviceId.assign(deviceId.data(), deviceId.size());
+    parsed.appId.assign(appId.data(), appId.size());
+    parsed.resourceId.assign(resourceId.data(), resourceId.size());
+}
+
+bool DataReader::commitParsedRow(Halo& engine, const ParsedCsvRow& parsed) {
+    if (!parsed.countTotal) {
+        return false;
+    }
+
+    engine.incrementTotalRead();
+    if (parsed.skipped) {
+        engine.incrementSkipped();
+        return false;
+    }
+    if (parsed.replaced) {
+        engine.incrementReplaced();
+    }
+
+    engine.processRecord(parsed.record, parsed.userId, parsed.deviceId, parsed.appId,
+                         parsed.resourceId);
+    return true;
+}
+
+bool DataReader::processLine(Halo& engine, std::string_view line) {
     if (line.empty()) {
         return false;
     }
@@ -262,37 +375,29 @@ bool DataReader::processLine(Halo& engine, const std::string& line) {
     }
 
     bool hasReplaced = false;
-    std::string userId;
-    std::string deviceId;
-    std::string appId;
-    std::string resourceId;
+    std::string_view userId = fields[0];
+    std::string_view deviceId = fields[1];
+    std::string_view appId = fields[2];
+    std::string_view resourceId = fields[3];
 
     if (!isValidId(fields[0], "U")) {
         userId = "UNKNOWN_USER";
         hasReplaced = true;
-    } else {
-        userId.assign(fields[0].data(), fields[0].size());
     }
 
     if (!isValidId(fields[1], "D")) {
         deviceId = "UNKNOWN_DEVICE";
         hasReplaced = true;
-    } else {
-        deviceId.assign(fields[1].data(), fields[1].size());
     }
 
     if (!isValidId(fields[2], "APP")) {
         appId = "UNKNOWN_APP";
         hasReplaced = true;
-    } else {
-        appId.assign(fields[2].data(), fields[2].size());
     }
 
     if (!isValidId(fields[3], "R")) {
         resourceId = "UNKNOWN_RESOURCE";
         hasReplaced = true;
-    } else {
-        resourceId.assign(fields[3].data(), fields[3].size());
     }
 
     bool evValid = true;
@@ -333,13 +438,13 @@ void DataReader::readAll(Halo& engine) {
         return;
     }
 
-    std::string header;
-    std::string line;
-    file.readLine(header);
-    line.reserve(512);
+    std::string scratch;
+    std::string_view line;
+    scratch.reserve(512);
+    file.readLine(line, scratch);
 
     int acceptedRows = 0;
-    while (file.readLine(line)) {
+    while (file.readLine(line, scratch)) {
         if (processLine(engine, line)) {
             acceptedRows++;
         }
@@ -347,6 +452,96 @@ void DataReader::readAll(Halo& engine) {
 
     std::cout << "Da doc xong CSV mot pass. Ban ghi hop le: " << acceptedRows
               << "." << std::endl;
+}
+
+bool DataReader::readSomeParallel(Halo& engine, Win32LineReader& file, int maxRows,
+                                  uint64_t fileSize, long long& nextOffset,
+                                  int& acceptedRows) {
+    std::string scratch;
+    std::string_view line;
+    scratch.reserve(512);
+
+    int processedRows = 0;
+    int nextProgressMark =
+        fileSize > LARGE_FILE_PROGRESS_THRESHOLD ? maxRows + 1 : IMPORT_PROGRESS_ROWS;
+    auto chunkStart = std::chrono::steady_clock::now();
+    bool eof = false;
+
+    unsigned int hw = std::thread::hardware_concurrency();
+    size_t maxWorkers = hw > 1 ? static_cast<size_t>(hw - 1) : 1;
+    if (maxWorkers > 8) {
+        maxWorkers = 8;
+    }
+
+    Vector<std::string> lines;
+    Vector<ParsedCsvRow> parsedRows;
+    lines.reserve(PARALLEL_PARSE_BATCH_ROWS);
+
+    while (processedRows < maxRows) {
+        lines.setSize(0);
+        int batchLimit = maxRows - processedRows;
+        if (batchLimit > PARALLEL_PARSE_BATCH_ROWS) {
+            batchLimit = PARALLEL_PARSE_BATCH_ROWS;
+        }
+
+        for (int i = 0; i < batchLimit; i++) {
+            if (!file.readLine(line, scratch)) {
+                eof = true;
+                break;
+            }
+            std::string copied(line.data(), line.size());
+            lines.pushBack(std::move(copied));
+        }
+
+        if (lines.empty()) {
+            break;
+        }
+
+        parsedRows.setSize(lines.size());
+
+        size_t workers = maxWorkers;
+        if (workers > lines.size()) {
+            workers = lines.size();
+        }
+        if (workers <= 1) {
+            for (size_t i = 0; i < lines.size(); i++) {
+                parseLineToRow(lines[i], parsedRows[i]);
+            }
+        } else {
+            Vector<std::thread> threads;
+            threads.reserve(workers);
+            for (size_t worker = 0; worker < workers; worker++) {
+                size_t begin = (lines.size() * worker) / workers;
+                size_t end = (lines.size() * (worker + 1)) / workers;
+                threads.pushBack(std::thread([this, &lines, &parsedRows, begin, end]() {
+                    for (size_t i = begin; i < end; i++) {
+                        parseLineToRow(lines[i], parsedRows[i]);
+                    }
+                }));
+            }
+            for (size_t i = 0; i < threads.size(); i++) {
+                if (threads[i].joinable()) {
+                    threads[i].join();
+                }
+            }
+        }
+
+        for (size_t i = 0; i < parsedRows.size(); i++) {
+            processedRows++;
+            if (commitParsedRow(engine, parsedRows[i])) {
+                acceptedRows++;
+            }
+        }
+
+        if (IMPORT_PROGRESS_ROWS > 0 && processedRows >= nextProgressMark) {
+            logImportProgress("Dang doc CSV song song", processedRows, acceptedRows,
+                              maxRows, file.tell(), fileSize, chunkStart);
+            nextProgressMark += IMPORT_PROGRESS_ROWS;
+        }
+    }
+
+    nextOffset = file.tell();
+    return eof || processedRows < maxRows;
 }
 
 bool DataReader::readSome(Halo& engine, long long startOffset, int maxRows,
@@ -373,17 +568,26 @@ bool DataReader::readSome(Halo& engine, long long startOffset, int maxRows,
             return true;
         }
     } else {
-        std::string header;
-        file.readLine(header);
+        std::string headerScratch;
+        std::string_view header;
+        file.readLine(header, headerScratch);
     }
 
-    std::string line;
-    line.reserve(512);
+    unsigned int hw = std::thread::hardware_concurrency();
+    if ((forceParallelParse || fileSize >= PARALLEL_PARSE_FILE_THRESHOLD) && hw >= 4) {
+        return readSomeParallel(engine, file, maxRows, fileSize, nextOffset,
+                                acceptedRows);
+    }
+
+    std::string scratch;
+    std::string_view line;
+    scratch.reserve(512);
     int processedRows = 0;
-    int nextProgressMark = IMPORT_PROGRESS_ROWS;
+    int nextProgressMark =
+        fileSize > LARGE_FILE_PROGRESS_THRESHOLD ? maxRows + 1 : IMPORT_PROGRESS_ROWS;
     auto chunkStart = std::chrono::steady_clock::now();
 
-    while (processedRows < maxRows && file.readLine(line)) {
+    while (processedRows < maxRows && file.readLine(line, scratch)) {
         processedRows++;
         if (processLine(engine, line)) {
             acceptedRows++;

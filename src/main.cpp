@@ -18,6 +18,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 
@@ -28,8 +29,25 @@
 
 namespace fs = std::filesystem;
 
-const int IMPORT_CHECKPOINT_ROWS = 2000000;
+const int IMPORT_CHUNK_ROWS = 2000000;
+const uint64_t DEFAULT_CHECKPOINT_ROWS = 2000000ULL;
 const int HALO_PORT = 24117;
+
+struct DatasetLoadMetrics {
+    double binaryLoadTimeMs = 0.0;
+    double csvImportTimeMs = 0.0;
+    double checkpointTimeMs = 0.0;
+    double finalizeTimeMs = 0.0;
+    double sortTimeMs = 0.0;
+    double deduplicateTimeMs = 0.0;
+    double indexBuildTimeMs = 0.0;
+    std::string sortAlgorithm;
+    uint64_t checkpointBytesWritten = 0;
+    uint64_t checkpointCount = 0;
+    uint64_t estimatedRecords = 0;
+    bool resumedCheckpoint = false;
+    bool parallelCsvParsing = false;
+};
 
 // Decode URL entities
 std::string urlDecode(const std::string& src) {
@@ -84,6 +102,96 @@ int getIntParam(const std::string& query, const std::string& key,
         return defaultValue;
     }
     return static_cast<int>(parsed);
+}
+
+SortMode parseSortModeParam(const std::string& query) {
+    std::string raw = getQueryParam(query, "sortMode");
+    if (raw == "merge") {
+        return SortMode::Merge;
+    }
+    if (raw == "intro" || raw == "introsort" || raw == "quick") {
+        return SortMode::Intro;
+    }
+    if (raw == "radix" || raw == "radix-hybrid") {
+        return SortMode::RadixHybrid;
+    }
+    if (raw == "external" || raw == "external-partitioned" || raw == "partitioned") {
+        return SortMode::ExternalPartitioned;
+    }
+    return SortMode::Auto;
+}
+
+size_t estimateCsvRecordCount(const std::string& csvFile, uint64_t csvSize) {
+    if (csvSize == 0) {
+        return 0;
+    }
+
+    std::ifstream input(csvFile, std::ios::binary);
+    if (!input.is_open()) {
+        return 0;
+    }
+
+    std::string line;
+    if (!std::getline(input, line)) {
+        return 0;
+    }
+
+    constexpr size_t SAMPLE_ROWS = 4096;
+    uint64_t sampledBytes = 0;
+    size_t sampledRows = 0;
+    while (sampledRows < SAMPLE_ROWS && std::getline(input, line)) {
+        sampledBytes += static_cast<uint64_t>(line.size()) + 1;
+        sampledRows++;
+    }
+
+    if (sampledRows == 0 || sampledBytes == 0) {
+        return 0;
+    }
+
+    double averageBytes =
+        static_cast<double>(sampledBytes) / static_cast<double>(sampledRows);
+    uint64_t estimate =
+        static_cast<uint64_t>(static_cast<double>(csvSize) / averageBytes * 1.03);
+    uint64_t maxRecords =
+        static_cast<uint64_t>(std::numeric_limits<int>::max()) - 1ULL;
+    if (estimate > maxRecords) {
+        estimate = maxRecords;
+    }
+    return static_cast<size_t>(estimate);
+}
+
+struct ImportReserveHints {
+    size_t records = 0;
+    size_t users = 0;
+    size_t devices = 0;
+    size_t apps = 0;
+    size_t resources = 0;
+};
+
+ImportReserveHints estimateImportReserveHints(size_t estimatedRecords) {
+    ImportReserveHints hints;
+    hints.records = estimatedRecords;
+    if (estimatedRecords < 5000000ULL) {
+        return hints;
+    }
+
+    hints.users = estimatedRecords / 50ULL;
+    if (hints.users < 1000ULL) {
+        hints.users = 1000ULL;
+    }
+    hints.devices = estimatedRecords / 100ULL;
+    if (hints.devices < 1000ULL) {
+        hints.devices = 1000ULL;
+    }
+    hints.apps = estimatedRecords / 1000ULL;
+    if (hints.apps < 100ULL) {
+        hints.apps = 100ULL;
+    }
+    hints.resources = estimatedRecords / 500ULL;
+    if (hints.resources < 1000ULL) {
+        hints.resources = 1000ULL;
+    }
+    return hints;
 }
 
 bool parseTimeRange(const std::string& query, uint64_t& startTime,
@@ -236,11 +344,15 @@ bool loadImportCheckpoint(Halo& engine, const std::string& csvFile,
 }
 
 bool saveImportCheckpoint(const Halo& engine, const std::string& csvFile,
-                          const std::string& checkpointFile,
-                          long long offset) {
+                           const std::string& checkpointFile,
+                           long long offset,
+                           uint64_t* bytesWritten = nullptr) {
     std::string snapshotPath = checkpointFile + ".dat";
     std::string snapshotTmp = snapshotPath + ".writing";
     std::string metaTmp = checkpointFile + ".writing";
+    if (bytesWritten != nullptr) {
+        *bytesWritten = 0;
+    }
 
     if (!engine.saveToBinary(snapshotTmp)) {
         return false;
@@ -266,24 +378,49 @@ bool saveImportCheckpoint(const Halo& engine, const std::string& csvFile,
         return false;
     }
 
+    if (bytesWritten != nullptr) {
+        try {
+            *bytesWritten =
+                static_cast<uint64_t>(fs::file_size(snapshotPath)) +
+                static_cast<uint64_t>(fs::file_size(checkpointFile));
+        } catch (...) {
+            *bytesWritten = 0;
+        }
+    }
+
     return true;
 }
 
 // Fully load dataset, returns true if loaded from .dat
 bool loadDatasetCompletely(Halo& engine, const std::string& csvFile,
-                           const std::string& checkpointFile,
-                           bool enableImportCheckpoint) {
+                            const std::string& checkpointFile,
+                            bool enableImportCheckpoint,
+                            bool enableParallelCsv,
+                            uint64_t checkpointBaseRows,
+                            DatasetLoadMetrics& metrics) {
+    metrics = DatasetLoadMetrics();
     std::string binPath = csvFile + ".dat";
     std::cout << "Dang kiem tra bo dem nhi phan: " << binPath << "...\n";
-    if (isBinaryCacheFresh(csvFile, binPath) && engine.loadFromBinary(binPath)) {
-        std::cout << ">> DA NAP THANH CONG tu bo dem nhi phan (.dat) trong nhay mat!\n";
-        std::cout << "Hoan tat nap du lieu! Ban ghi sach: " << engine.getRecordCount() << "\n";
-        return true;
+    if (isBinaryCacheFresh(csvFile, binPath)) {
+        auto binaryStart = std::chrono::high_resolution_clock::now();
+        if (engine.loadFromBinary(binPath)) {
+            auto binaryEnd = std::chrono::high_resolution_clock::now();
+            metrics.binaryLoadTimeMs =
+                std::chrono::duration<double, std::milli>(binaryEnd - binaryStart).count();
+            const FinalizeMetrics& finalizeMetrics = engine.getFinalizeMetrics();
+            metrics.indexBuildTimeMs = finalizeMetrics.indexBuildTimeMs;
+            std::cout << ">> DA NAP THANH CONG tu bo dem nhi phan (.dat) trong nhay mat!\n";
+            std::cout << "Hoan tat nap du lieu! Ban ghi sach: " << engine.getRecordCount() << "\n";
+            return true;
+        }
     }
 
     std::cout << "Dang nap tap du lieu tu: " << csvFile << "...\n";
     std::cout << "Che do checkpoint import: "
               << (enableImportCheckpoint ? "bat" : "tat") << ".\n";
+    std::cout << "Che do parse CSV song song: "
+              << (enableParallelCsv ? "bat" : "tu dong") << ".\n";
+    metrics.parallelCsvParsing = enableParallelCsv;
     engine.clear();
 
     if (!enableImportCheckpoint) {
@@ -292,6 +429,7 @@ bool loadDatasetCompletely(Halo& engine, const std::string& csvFile,
 
     long long startOffset = 0;
     if (enableImportCheckpoint && loadImportCheckpoint(engine, csvFile, checkpointFile, startOffset)) {
+        metrics.resumedCheckpoint = true;
         std::cout << ">> Khoi phuc checkpoint CSV tai byte offset "
                   << startOffset << ".\n";
     }
@@ -303,12 +441,33 @@ bool loadDatasetCompletely(Halo& engine, const std::string& csvFile,
         csvSize = 0;
     }
 
-    DataReader reader(csvFile);
+    size_t estimatedRecords = estimateCsvRecordCount(csvFile, csvSize);
+    metrics.estimatedRecords = static_cast<uint64_t>(estimatedRecords);
+    constexpr size_t PRE_SIZE_MIN_RECORDS = 5000000;
+    if (estimatedRecords >= PRE_SIZE_MIN_RECORDS &&
+        estimatedRecords > engine.getRecordCount()) {
+        ImportReserveHints hints = estimateImportReserveHints(estimatedRecords);
+        engine.reserveForImport(hints.records, hints.users, hints.devices, hints.apps,
+                                hints.resources);
+    }
+
+    if (checkpointBaseRows == 0) {
+        checkpointBaseRows = DEFAULT_CHECKPOINT_ROWS;
+    }
+    uint64_t nextCheckpointRows = checkpointBaseRows;
+    uint64_t currentRows = engine.getTotalReadCount();
+    while (nextCheckpointRows <= currentRows &&
+           nextCheckpointRows <= std::numeric_limits<uint64_t>::max() / 2) {
+        nextCheckpointRows *= 2;
+    }
+
+    DataReader reader(csvFile, enableParallelCsv);
     int chunkIdx = 1;
+    auto importStart = std::chrono::high_resolution_clock::now();
     while (true) {
         long long nextOffset = startOffset;
         int acceptedRows = 0;
-        bool eof = reader.readSome(engine, startOffset, IMPORT_CHECKPOINT_ROWS,
+        bool eof = reader.readSome(engine, startOffset, IMPORT_CHUNK_ROWS,
                                    nextOffset, acceptedRows);
 
         std::cout << "  - Import part " << chunkIdx++
@@ -330,16 +489,45 @@ bool loadDatasetCompletely(Halo& engine, const std::string& csvFile,
             break;
         }
 
-        if (enableImportCheckpoint) {
-            if (!saveImportCheckpoint(engine, csvFile, checkpointFile, nextOffset)) {
+        if (enableImportCheckpoint &&
+            engine.getTotalReadCount() >= nextCheckpointRows) {
+            uint64_t checkpointBytes = 0;
+            auto checkpointStart = std::chrono::high_resolution_clock::now();
+            bool checkpointOk =
+                saveImportCheckpoint(engine, csvFile, checkpointFile, nextOffset,
+                                     &checkpointBytes);
+            auto checkpointEnd = std::chrono::high_resolution_clock::now();
+            metrics.checkpointTimeMs +=
+                std::chrono::duration<double, std::milli>(checkpointEnd - checkpointStart).count();
+            if (checkpointOk) {
+                metrics.checkpointBytesWritten += checkpointBytes;
+                metrics.checkpointCount++;
+            } else {
                 std::cout << ">> Canh bao: khong ghi duoc checkpoint import.\n";
             }
+            do {
+                if (nextCheckpointRows >
+                    std::numeric_limits<uint64_t>::max() / 2) {
+                    nextCheckpointRows = std::numeric_limits<uint64_t>::max();
+                    break;
+                }
+                nextCheckpointRows *= 2;
+            } while (nextCheckpointRows <= engine.getTotalReadCount());
         }
         startOffset = nextOffset;
     }
+    auto importEnd = std::chrono::high_resolution_clock::now();
+    metrics.csvImportTimeMs =
+        std::chrono::duration<double, std::milli>(importEnd - importStart).count();
 
     std::cout << "Dang sap xep va loai bo ban ghi trung lap...\n";
     engine.finalizeLoading();
+    const FinalizeMetrics& finalizeMetrics = engine.getFinalizeMetrics();
+    metrics.finalizeTimeMs = finalizeMetrics.finalizeTimeMs;
+    metrics.sortTimeMs = finalizeMetrics.sortTimeMs;
+    metrics.sortAlgorithm = finalizeMetrics.sortAlgorithm;
+    metrics.deduplicateTimeMs = finalizeMetrics.deduplicateTimeMs;
+    metrics.indexBuildTimeMs = finalizeMetrics.indexBuildTimeMs;
     std::cout << "Hoan tat nap du lieu! Ban ghi sach: " << engine.getRecordCount() << "\n";
 
     if (enableImportCheckpoint) {
@@ -366,7 +554,7 @@ int main() {
     Vector<Workspace*> workspaces;
 
     auto getWorkspace = [&](const std::string& name) -> Halo* {
-        for (int i = 0; i < workspaces.size(); ++i) {
+        for (size_t i = 0; i < workspaces.size(); ++i) {
             if (workspaces[i]->name == name) {
                 return workspaces[i]->engine;
             }
@@ -480,7 +668,7 @@ int main() {
             std::string responseHeader = "";
             std::string responseBody = "";
 
-            if (path == "/" || path == "/index.html") {
+            if (path == "/" || path == "index.html") {
                 // Try serving local index.html
                 std::ifstream htmlFile("index.html");
                 if (!htmlFile.is_open()) {
@@ -512,7 +700,7 @@ int main() {
                 std::stringstream json;
                 Vector<std::string> loadedNames;
 
-                for (int i = 0; i < workspaces.size(); ++i) {
+                for (size_t i = 0; i < workspaces.size(); ++i) {
                     loadedNames.pushBack(workspaces[i]->name);
                 }
 
@@ -532,7 +720,7 @@ int main() {
                             }
 
                             bool existsInList = false;
-                            for (int i = 0; i < loadedNames.size(); i++) {
+                            for (size_t i = 0; i < loadedNames.size(); i++) {
                                 if (loadedNames[i] == datasetName) {
                                     existsInList = true;
                                     break;
@@ -549,7 +737,7 @@ int main() {
 
                 json << "[";
                 bool first = true;
-                for (int i = 0; i < loadedNames.size(); i++) {
+                for (size_t i = 0; i < loadedNames.size(); i++) {
                     if (!first) {
                         json << ",";
                     }
@@ -605,6 +793,15 @@ int main() {
                 std::string resumeCheckpointParam = getQueryParam(query, "resumeCheckpoint");
                 bool enableImportCheckpoint = (resumeCheckpointParam == "1" ||
                                                resumeCheckpointParam == "true");
+                std::string parallelCsvParam = getQueryParam(query, "parallelCsv");
+                bool enableParallelCsv = (parallelCsvParam == "1" ||
+                                          parallelCsvParam == "true");
+                uint64_t checkpointBaseRows =
+                    getUintParam(query, "checkpointRows", DEFAULT_CHECKPOINT_ROWS);
+                if (checkpointBaseRows < 100000ULL) {
+                    checkpointBaseRows = 100000ULL;
+                }
+                SortMode requestedSortMode = parseSortModeParam(query);
                 std::string filePath = "./data/" + fileParam;
 
                 bool success = true;
@@ -613,6 +810,7 @@ int main() {
                 double loadTimeMs = 0.0;
                 double memoryMB = 0.0;
                 double cacheTimeMs = 0.0;
+                DatasetLoadMetrics loadMetrics;
 
                 if (fileParam.empty()) {
                     success = false;
@@ -632,6 +830,7 @@ int main() {
                             throw;
                         }
                     }
+                    engine->setSortMode(requestedSortMode);
 
                     std::string checkpointFile = "./data/Checkpoint_" + fileParam + ".tmp";
 
@@ -646,7 +845,10 @@ int main() {
                     try {
                         loadedFromDat = loadDatasetCompletely(*engine, filePath,
                                                               checkpointFile,
-                                                              enableImportCheckpoint);
+                                                              enableImportCheckpoint,
+                                                              enableParallelCsv,
+                                                              checkpointBaseRows,
+                                                              loadMetrics);
                     } catch (const std::exception& e) {
                         success = false;
                         errorMsg = e.what();
@@ -687,9 +889,25 @@ int main() {
                     json << "{\n"
                          << "  \"success\": true,\n"
                          << "  \"error\": \"\",\n"
-                         << "  \"timeMs\": " << loadTimeMs << ",\n"
-                         << "  \"cacheTimeMs\": " << cacheTimeMs << ",\n"
-                         << "  \"memoryMB\": " << memoryMB << ",\n"
+                          << "  \"timeMs\": " << loadTimeMs << ",\n"
+                          << "  \"cacheTimeMs\": " << cacheTimeMs << ",\n"
+                          << "  \"metrics\": {\n"
+                          << "    \"binaryLoadTimeMs\": " << loadMetrics.binaryLoadTimeMs << ",\n"
+                          << "    \"csvImportTimeMs\": " << loadMetrics.csvImportTimeMs << ",\n"
+                          << "    \"checkpointTimeMs\": " << loadMetrics.checkpointTimeMs << ",\n"
+                          << "    \"checkpointBytesWritten\": " << loadMetrics.checkpointBytesWritten << ",\n"
+                          << "    \"checkpointCount\": " << loadMetrics.checkpointCount << ",\n"
+                          << "    \"estimatedRecords\": " << loadMetrics.estimatedRecords << ",\n"
+                          << "    \"resumedCheckpoint\": " << (loadMetrics.resumedCheckpoint ? "true" : "false") << ",\n"
+                          << "    \"parallelCsvParsing\": " << (loadMetrics.parallelCsvParsing ? "true" : "false") << ",\n"
+                          << "    \"finalizeTimeMs\": " << loadMetrics.finalizeTimeMs << ",\n"
+                          << "    \"sortTimeMs\": " << loadMetrics.sortTimeMs << ",\n"
+                          << "    \"sortAlgorithm\": \"" << jsonEscape(loadMetrics.sortAlgorithm) << "\",\n"
+                          << "    \"deduplicateTimeMs\": " << loadMetrics.deduplicateTimeMs << ",\n"
+                          << "    \"indexBuildTimeMs\": " << loadMetrics.indexBuildTimeMs << ",\n"
+                          << "    \"cacheSaveTimeMs\": " << cacheTimeMs << "\n"
+                          << "  },\n"
+                          << "  \"memoryMB\": " << memoryMB << ",\n"
                          << "  \"loadedFromDat\": " << (loadedFromDat ? "true" : "false") << ",\n"
                          << "  \"stats\": {\n"
                          << "    \"users\": " << engine->getUserCount() << ",\n"
@@ -745,7 +963,7 @@ int main() {
                          << "  \"count\": " << results.size() << ",\n"
                          << "  \"data\": [\n";
 
-                    for (int i = 0; i < results.size(); i++) {
+                    for (size_t i = 0; i < results.size(); i++) {
                         json << "    {\n"
                              << "      \"timestamp\": " << results[i].timestamp << ",\n"
                              << "      \"device\": \"" << jsonEscape(results[i].device) << "\",\n"
@@ -794,7 +1012,7 @@ int main() {
                          << "  \"count\": " << results.size() << ",\n"
                          << "  \"data\": [\n";
 
-                    for (int i = 0; i < results.size(); i++) {
+                    for (size_t i = 0; i < results.size(); i++) {
                         json << "    {\n"
                              << "      \"timestamp\": " << results[i].timestamp << ",\n"
                              << "      \"user\": \"" << jsonEscape(results[i].user) << "\",\n"
@@ -842,7 +1060,7 @@ int main() {
                          << "  \"count\": " << resourceNames.size() << ",\n"
                          << "  \"data\": [\n";
 
-                    for (int i = 0; i < resourceNames.size(); i++) {
+                    for (size_t i = 0; i < resourceNames.size(); i++) {
                         json << "    {\n"
                              << "      \"resource\": \"" << jsonEscape(resourceNames[i]) << "\",\n"
                              << "      \"count\": " << accessCounts[i] << "\n"
@@ -918,7 +1136,7 @@ int main() {
                          << "  \"summary\": \"Detected " << total << " anomalies in " << timeMs << " ms\",\n"
                          << "  \"timeMs\": " << timeMs << ",\n"
                          << "  \"data\": [\n";
-                    for (int i = 0; i < results.size(); i++) {
+                    for (size_t i = 0; i < results.size(); i++) {
                         json << "    {\n"
                              << "      \"type\": \"" << jsonEscape(results[i].type) << "\",\n"
                              << "      \"severity\": \"" << jsonEscape(results[i].severity) << "\",\n"
@@ -1099,7 +1317,7 @@ int main() {
     }
 
     // 6. Cleanup workspaces to prevent memory leaks
-    for (int i = 0; i < workspaces.size(); i++) {
+    for (size_t i = 0; i < workspaces.size(); i++) {
         delete workspaces[i];
     }
 

@@ -1,6 +1,12 @@
 # HALO Optimization Guide
 
-**Goal:** make the current HALO codebase handle large datasets more safely and more predictably, especially in the `10M` to `120M` record range.
+**Goal:** make the current HALO codebase handle large datasets more safely and more predictably, especially in the `10M` to `500M` record range.
+
+Current implementation status:
+
+- done: opt-in checkpoints, `size_t` reserves, duplicate-string removal, radix-hybrid sort, direct numeric ID fast path, parallel index build, memory-mapped `.dat` loading, external/partitioned sort fallback, heuristic reserve hints from CSV estimates, opt-in batched multi-thread CSV parsing
+- still open: no required coursework optimization items; future-only hash-table redesign may be revisited if the data shape changes
+- practical note: `500M+` records needs a different storage/sort architecture than this coursework pass
 
 This version is optimized for the code that actually exists today, not a generic future architecture. It focuses first on the real bottlenecks in:
 
@@ -19,14 +25,16 @@ This version is optimized for the code that actually exists today, not a generic
 
 ## Quick Summary
 
-If we only have time for a few changes, do these first:
+If we only have time for a few changes, these are the ones that matter most and are now implemented in code:
 
-1. Stop writing a full engine snapshot after every `2M` imported rows
-2. Upgrade the existing `Vector::reserve(int)` path to safer `size_t` sizing, then add explicit pre-size support to `HashTable`, `IdTable`, `RecordStorage`, and index arrays
-3. Replace risky `int` size/index fields on the hot path with `size_t` or explicit fixed-width types
-4. Reduce duplicate string storage between `IdTable` and `HashTable`
-5. Keep the current graph default off for very large imports unless it is truly needed
-6. Add benchmarks before attempting heavy redesigns
+1. Stop writing a full engine snapshot after every `2M` imported rows; make checkpoints opt-in and less frequent
+2. Upgrade size/capacity/reserve paths to `size_t`, then add explicit pre-size support to `HashTable`, `IdTable`, `RecordStorage`, and index arrays
+3. Replace risky `int` size/index fields on the hot path with `size_t` or explicit fixed-width types, while keeping compact internal IDs guarded
+4. Remove duplicate string storage between `IdTable` and `HashTable`
+5. Keep the graph default off for very large imports unless it is truly needed
+6. Benchmark parse, checkpoint, sort, deduplicate, index build, and memory separately
+
+The current default sort path for large imports is now radix-hybrid, with merge still available for comparison and fallback.
 
 These are much more relevant to this repo than jumping directly to SIMD, column storage, or double hashing.
 
@@ -38,20 +46,20 @@ This document was checked against the current source tree. Most of the direction
 
 ### Accurate and worth doing
 
-- Full import checkpoints really do call `Halo::saveToBinary()` on the accumulated engine, so checkpoint work grows with already-imported data.
-- `HashTable::Node.key` and `IdTable::names` really do own duplicate copies of every unique ID string.
-- `buildGraph` is already `false` by default, and graph edges use linear duplicate checks through `pushBackUnique()`.
-- `RecordStorage::sortRecords()` uses merge sort, and the current merge creates two temporary vectors for every merge call.
-- The binary format writes counts and string lengths as `int`, so widening in-memory types must be paired with a format-version decision.
+- Full import checkpoints still call `Halo::saveToBinary()` on the accumulated engine when resume is enabled, but now the schedule is geometric instead of fixed every `2M` rows. The cost is lower than before, but it is still a full snapshot.
+- `HashTable::Node` no longer stores owned strings. `IdTable` owns the canonical strings, while the hash table keeps cached hashes and internal IDs, plus a direct numeric fast path for the CSV ID shapes used here.
+- `buildGraph` is already `false` by default, and graph edges still use linear duplicate checks through `pushBackUnique()`.
+- `RecordStorage::sortRecords()` now supports merge, intro, and radix-hybrid. Merge uses one reusable buffer, and radix-hybrid is the current best default on large imports.
+- The binary format still writes counts and string lengths as `int`, so widening in-memory types still has to be paired with a format-version decision.
 
 ### Corrected or needs care
 
-- `Vector` already has `reserve(int)`. The real issue is that size, capacity, constructors, indexes, and `reserve()` still use `int`, and callers do not consistently pre-size large hot-path arrays.
+- `Vector` already uses `size_t` for size and capacity, and the remaining question is how consistently callers pre-size large hot-path arrays.
 - Do not make `HashTable` store raw pointers or references into `Vector<string> names` unless the string storage has stable addresses. The current `Vector` moves `string` objects when it resizes, so those references would become unsafe.
-- The checkpoint write-amplification formula should include every full chunk that is snapshotted. For an exact `20M` records with `C = 2M`, the current loop writes snapshots for `2M, 4M, ..., 20M`.
-- Widening types does not mean every ID field must become `uint64_t` immediately. For the current `120M` target, container sizes and record-index arrays are more urgent; compact internal IDs can stay `int32_t` if guarded by clear maximums.
+- The remaining checkpoint cost depends on the geometric snapshot schedule, but it is still full-engine write work and should be counted separately from CSV parsing.
+- Widening types does not mean every ID field must become `uint64_t` immediately. For the current `500M` target, container sizes and record-index arrays are more urgent; compact internal IDs can stay `int32_t` if guarded by clear maximums.
 - Graph mode is not a new feature to disable; it is already disabled. The action item is to keep it that way for huge imports and avoid enabling it implicitly from UI/load paths.
-- Full multi-threaded CSV parsing is a later production-scale item, not a first-pass course-project optimization.
+- Batched multi-threaded CSV parsing now exists as an opt-in path (`parallelCsv=1`) and an auto path for very large files, but it is intentionally not the default for mid-size datasets because line-copy and thread overhead can dominate.
 
 ## Must-Do Checklist
 
@@ -59,10 +67,10 @@ If the target is "optimize hard but do not break the current system", these are 
 
 ### Must do now
 
-1. Redesign import checkpoints so they do not serialize the entire accumulated engine every `2M` rows
-2. Convert `Vector` size/capacity/reserve APIs from `int` to `size_t`, then add public `reserve()` / pre-size support for `HashTable`, `IdTable`, `RecordStorage`, and major index arrays
-3. Replace risky `int` size/index fields on the ingest and indexing path with `size_t` or fixed-width types where the upper bound is explicit
-4. Remove duplicated string ownership between `IdTable` and `HashTable`
+1. Keep checkpointing opt-in and measured; do not reintroduce full snapshots on the normal import path
+2. Keep `Vector`/reserve APIs on `size_t`, and preserve pre-size hooks for `HashTable`, `IdTable`, `RecordStorage`, and index arrays
+3. Keep hot-path `int` usage only where the upper bound is explicit and guarded
+4. Keep canonical string ownership in `IdTable`, not duplicated in `HashTable`
 5. Preserve the current `buildGraph = false` default for very large imports and document when graph rebuilding is allowed
 6. Benchmark parse, checkpoint, sort, deduplicate, index build, and memory separately
 
@@ -70,15 +78,14 @@ If the target is "optimize hard but do not break the current system", these are 
 
 1. Reuse one merge-sort buffer, then evaluate radix sort for timestamp-heavy ordering
 2. Add lazy index build or parallel index build
-3. Add memory-mapped loading for `.dat` files
-4. Evaluate multi-threaded CSV parsing only after the single-threaded import path is measured and stable
+3. Keep multi-threaded CSV parsing opt-in or very-large-file-only unless benchmarks show it wins on the current machine and dataset shape
 
 ### Do not prioritize yet
 
 1. Double hashing
 2. SIMD
 3. Column-oriented storage
-4. Full multi-threaded CSV parsing for the current coursework milestone
+4. Making multi-threaded CSV parsing the default for all dataset sizes
 5. Large architectural rewrites
 
 Reason:
@@ -108,6 +115,7 @@ The main risk is:
 3. Too many resizes and rehashes during import
 4. Too much RAM spent storing the same strings multiple times
 5. `int`-based counters and indexes getting too close to their limits
+6. On very large files, the importer becomes memory-bandwidth bound, so throughput drops once the working set outgrows CPU cache
 
 In other words:
 
@@ -118,123 +126,107 @@ In other words:
 
 ## Current Codebase Bottlenecks
 
-### 1. Import checkpoints repeatedly serialize the full accumulated engine
+### 1. Import checkpoints still serialize the full accumulated engine when enabled
 
 Current files: `src/main.cpp`, `src/Halo.cpp`
 
 Current behavior:
 
-- `IMPORT_CHECKPOINT_ROWS` is `2,000,000`
-- after each chunk for which `readSome()` reports non-EOF, `saveImportCheckpoint()` calls `Halo::saveToBinary()`
-- `saveToBinary()` writes all ID tables and every record accumulated so far
+- checkpointing is opt-in from the load API/UI
+- the importer uses a geometric schedule instead of blindly snapshotting every fixed chunk
+- `saveImportCheckpoint()` still calls `Halo::saveToBinary()` on the accumulated engine
 - the snapshot is overwritten, but the write work has already been performed
-- when row count is an exact multiple of `2M`, the last full chunk still reports non-EOF; EOF is discovered by the next empty read, so that final accumulated state is also snapshotted
+- when resume support is enabled, each checkpoint is still a full engine snapshot, so it remains expensive at very large scale
 
 Why this matters:
 
-- checkpoint cost grows with the amount of data already imported
-- a `20M` dataset is processed as ten `2M` chunks
-- the accumulated snapshots contain `2M + 4M + ... + 20M = 110M` record writes
-- at roughly `40` bytes per `DataRecords`, these snapshots write about `4.10 GiB` of raw record payload, excluding ID strings and metadata
-- this is extra I/O in addition to reading the roughly `1.1 GB` CSV and performing final sort/index work
+- checkpoint cost still grows with the amount of data already imported
+- geometric scheduling lowers the number of snapshots, but each one is still a full copy of the engine state
+- the remaining cost is still extra I/O in addition to reading the CSV and performing final sort/index work
 
 Complexity:
 
-For `N` records and checkpoint size `C`, repeated full snapshots perform approximately:
-
-```text
-k = floor(N / C)
-C + 2C + 3C + ... + kC = C * k * (k + 1) / 2
-```
-
-For exact multiples of `C`, the current loop still writes the `N`-record snapshot because EOF is only discovered on the next empty read. This is `O(N^2 / C)` snapshot work when `C` is fixed. It explains why increasing the input by `10x` can increase total load time by much more than `10x`.
-
-Observed example in this repository:
-
-- `2M` CSV: about `101.5 MB`, reported load time about `2.7 s`
-- `20M` CSV: about `1,095 MB`, reported load time about `55 s`
-- file size grows about `10.8x`, while elapsed time grows about `20.4x`
+Geometric full snapshots reduce the number of writes, but they are still bounded by full-engine state size rather than just row count. That is why this is still a checkpoint cost, not a cheap progress marker.
 
 Recommended fixes, in priority order:
 
-1. For normal uninterrupted imports, disable full-engine checkpoint snapshots.
-2. If resumability is required, checkpoint less frequently and make the interval configurable.
+1. For normal uninterrupted imports, keep full-engine checkpoint snapshots disabled.
+2. If resumability is required, keep the interval configurable and conservative.
 3. Store only lightweight progress metadata when possible; an offset alone is not sufficient unless the already-imported engine can be reconstructed or persisted incrementally.
-4. For robust resumability, write append-only binary chunks or partition files, then merge/finalize once at EOF.
+4. For robust resumability at much larger scale, write append-only binary chunks or partition files, then merge/finalize once at EOF.
 5. Report checkpoint time and checkpoint bytes separately from CSV parse time.
 
 Important correctness note:
 
 Removing the `.dat` snapshot while keeping only the CSV offset would be incorrect. On resume, the program would skip earlier CSV rows without restoring their in-memory records and ID mappings.
 
-### 2. `Vector` still uses `int` for size and capacity
+### 2. `Vector` now uses `size_t` for size and capacity
 
 Current file: `src/Vector.h`
 
-Current risks:
+Current state:
 
-- `count` and `capacity` are `int`
-- `reserve()`, `setSize()`, constructors, and `operator[]` also take `int`
-- growth uses `capacity * 2`
-- many loops also use `int`
+- size/capacity paths now use `size_t`
+- `reserve()` and `setSize()` still keep `int` overloads for compatibility
+- many loops have already been widened where they sit on the hot path
 
 Why this matters:
 
-- large imports can overflow `int`
-- repeated growth causes many reallocations and copies
-- anything close to billions of elements becomes unsafe
+- large imports are less likely to overflow `int`
+- repeated growth still matters, but the new reserve paths reduce churn
+- anything close to billions of elements still needs explicit guards elsewhere
 
 Impact:
 
-- correctness risk for very large datasets
-- significant ingest slowdown from repeated resize/copy
+- correctness risk is reduced
+- ingest slowdown from repeated resize/copy is much lower than before
 
-### 3. `HashTable` rehashes repeatedly and stores keys by value
+### 3. `HashTable` now caches hashes and IDs instead of storing keys by value
 
 Current files: `src/HashTable.h`, `src/HashTable.cpp`
 
-Current risks:
+Current state:
 
-- no public `reserve(expectedItems)`
-- each `Node` stores `string key`
-- collisions use linked-list chaining
-- every rehash walks all existing nodes
+- public `reserve(expectedItems)` exists
+- each `Node` stores a cached hash and internal ID
+- collisions still use linked-list chaining
+- every rehash still walks existing nodes
 
 Why this matters:
 
-- with many unique IDs, import cost grows fast
-- RAM usage increases because keys are stored again in the hash table
-- cache locality is poor because nodes are heap-allocated one by one
+- with many unique IDs, import cost still matters
+- RAM usage is lower now that keys are not stored twice
+- cache locality is still limited by heap-allocated nodes
 
-### 4. `IdTable` stores the same strings twice
+### 4. `IdTable` now owns the canonical strings once
 
 Current files: `src/idTable.h`, `src/idTable.cpp`
 
 Current behavior:
 
 - `names` stores every unique string once
-- `HashTable::Node.key` stores the same string again
+- the hash table references `names[id]` instead of storing another string copy
 
 Why this matters:
 
-- this doubles a major part of memory cost for large cardinality
-- user/device-heavy datasets suffer the most
+- this removes a major duplicate-memory cost for large cardinality
+- user/device-heavy datasets benefit the most
 
-### 5. `Halo` indexing also relies heavily on `int`
+### 5. `Halo` indexing still uses `int` in a few internal arrays
 
 Current files: `src/Halo.h`, `src/Halo.cpp`, `src/RecordStorage.h`, `src/RecordStorage.cpp`
 
-Current risks:
+Current state:
 
-- `userOffsets`, `deviceOffsets`, `resourceOffsets` use `Vector<int>`
-- `userRecordIndices`, `deviceRecordIndices`, `resourceRecordIndices` use `Vector<int>`
-- `records.size()` returns `int`
-- many loops and binary search bounds use `int`
+- `userOffsets`, `deviceOffsets`, `resourceOffsets` still use `Vector<int>`
+- `userRecordIndices`, `deviceRecordIndices`, `resourceRecordIndices` still use `Vector<int>`
+- `records.size()` now returns `size_t`
+- the hot path now guards overflow before new internal IDs are created
 
 Why this matters:
 
-- very large record counts and index arrays become fragile
-- it limits how far this code can scale before overflow or undefined behavior becomes realistic
+- very large record counts and index arrays are still the next place to watch
+- the current guards make the `int` choice intentional instead of accidental
 
 ### 6. Optional graph building is expensive for dense datasets
 
@@ -255,7 +247,7 @@ Why this matters:
 
 ## Highest-Priority Optimizations
 
-## 1. Fix Full-Snapshot Checkpointing
+## 1. Fix Full-Snapshot Checkpointing (done in current branch)
 
 Priority: critical
 Difficulty: medium
@@ -282,7 +274,7 @@ Expected impact:
 
 ---
 
-## 2. Add `reserve()` Everywhere It Matters
+## 2. Add `reserve()` Everywhere It Matters (done in current branch)
 
 Priority: very high
 Difficulty: low to medium
@@ -292,7 +284,7 @@ Add:
 
 - convert the existing `Vector::reserve(int)` and related capacity APIs to `size_t`
 - `HashTable::reserve(size_t expectedItems)`
-- `IdTable::reserve(size_t expectedUnique)`
+- `IdTable::reserve(size_t expectedUnique)` but keep it conservative on huge string vectors with the current `Vector` implementation
 - `RecordStorage::reserve(size_t expectedRecords)`
 - pre-sizing for record/index arrays when estimated sizes are known
 
@@ -324,7 +316,7 @@ After fixing full-snapshot checkpointing, this is the next safest high-impact op
 
 ---
 
-## 3. Move Hot-Path Sizes and Indexes Away From `int`
+## 3. Move Hot-Path Sizes and Indexes Away From `int` (partially done)
 
 Priority: very high
 Difficulty: medium
@@ -352,7 +344,7 @@ This is not just a performance change. It is also a scalability and correctness 
 
 ---
 
-## 4. Reduce Duplicate String Storage
+## 4. Reduce Duplicate String Storage (done in current branch)
 
 Priority: very high
 Difficulty: medium
@@ -361,13 +353,13 @@ Risk: medium
 Current issue:
 
 - `IdTable` keeps each unique string in `names`
-- `HashTable` keeps another owned copy in `Node.key`
+- `HashTable` now keeps only cached hashes and internal IDs, so the same string is not owned twice anymore
 
 Better options:
 
-1. Move string ownership into a stable string pool, then let the hash table store stable references or indexes.
-2. Make the hash table store only `id` plus cached hash, and compare a lookup key against `names[id]` through `IdTable`.
-3. Redesign `IdTable` as the owner of both canonical strings and lookup metadata so each unique string is stored once.
+1. Keep `IdTable` as the canonical string owner and let lookup metadata stay separate.
+2. If the data shape changes, move to a stable string pool or index-based lookup without raw pointers into `Vector<string>`.
+3. Keep the direct numeric fast path for CSV IDs that already follow the expected prefix-plus-number pattern.
 
 Avoid this unsafe shortcut:
 
@@ -385,7 +377,7 @@ Expected impact:
 
 ---
 
-## 5. Keep Graph Building Disabled For Huge Loads
+## 5. Keep Graph Building Disabled For Huge Loads (still correct)
 
 Priority: high
 Difficulty: low
@@ -408,7 +400,7 @@ Practical rule:
 
 ---
 
-## 6. Benchmark Before Any Major Redesign
+## 6. Benchmark Before Any Major Redesign (ongoing)
 
 Priority: high
 Difficulty: low
@@ -494,7 +486,7 @@ Recommended stance:
 
 ---
 
-## 9. Reusable Merge Buffer Or Radix Sort
+## 9. Reusable Merge Buffer Or Radix Sort (done in current branch)
 
 Priority: medium
 Difficulty: low to medium
@@ -505,8 +497,8 @@ This is still a good candidate because:
 - sorting is on integer-like keys
 - the dataset is large
 - merge sort cost grows significantly with scale
-- the current `merge()` creates fresh `L` and `R` vectors for every merge call
-- merge sort performs approximately `N - 1` merge calls, so `20M` records can trigger almost `40M` temporary vector allocations across the two temporary arrays
+- merge sort now uses one reusable buffer, which removes the old per-merge `L`/`R` allocation pattern
+- merge sort still performs `O(N log N)` work, so it loses to radix-hybrid on large timestamp-heavy datasets
 
 Theoretical scaling:
 
@@ -516,13 +508,13 @@ Theoretical scaling:
 
 Recommended stance:
 
-- first rewrite merge sort to allocate one reusable temporary buffer for the whole sort
-- then benchmark radix sort against the buffered merge sort
+- keep the reusable-buffer merge path as the comparison baseline
+- benchmark radix-hybrid against the buffered merge sort on the real dataset sizes
 - preserve the full ordering used by `DataRecords::operator<=`; sorting only by timestamp is not sufficient for reliable duplicate adjacency when other fields differ
 
 ---
 
-## 10. Lazy Or Parallel Index Building
+## 10. Lazy Or Parallel Index Building (parallel variant done)
 
 Priority: medium
 Difficulty: medium
@@ -535,8 +527,8 @@ This is useful if:
 
 But note:
 
-- current index arrays are still `int`-based
-- that foundation should be stabilized first
+- the current code now uses `size_t` for container sizes, but some internal index arrays still use `int`
+- keep those bounds explicit when extending the query layer
 
 ---
 
@@ -557,7 +549,6 @@ Why:
 - current `HashTable` uses separate chaining
 - classic double hashing usually belongs to open addressing
 - just adding a second hash without redesigning layout does not remove:
-  - duplicate string storage
   - node heap allocation
   - pointer chasing
   - rehash cost
@@ -649,55 +640,40 @@ Practical rule:
 
 ## Recommended Roadmap
 
-## Phase 1: Safe wins inside current architecture
+## Completed in this branch
 
-1. Disable or redesign full-engine checkpoint snapshots during normal imports
-2. Add checkpoint timing and byte counters
-3. Upgrade `Vector::reserve()` to safe sizing and add `reserve()` to `HashTable`, `IdTable`, `RecordStorage`, and record/index paths
-4. Widen dangerous `int` size/index usage
-5. Benchmark again on `1M`, `2M`, `10M`, `20M`, and `50M`
+1. Opt-in checkpoint snapshots with measured checkpoint time/bytes
+2. `Vector`/reserve sizing on `size_t`
+3. `HashTable`, `IdTable`, and `RecordStorage` pre-sizing hooks
+4. Duplicate string ownership removed from `HashTable`
+5. Reusable merge buffer
+6. Radix-hybrid sort with an explicit merge fallback
+7. Guarded hot-path sizing and `size_t` loops in the importer and index builder
+8. Direct numeric fast path for the CSV ID shapes used by HALO
+9. Parallel index building for large datasets
+10. Benchmarking on `1M` and `20M` cold imports
+11. Batched multi-thread CSV parsing with sequential commit for deterministic ID mappings
 
-Expected outcome:
+## Still open for a later pass
 
-- lower import time
-- much lower checkpoint write amplification
-- fewer reallocations
-- fewer rehashes
-- better safety for large datasets
-
-## Phase 2: Memory reduction
-
-1. Remove duplicate string ownership between `IdTable` and `HashTable`
-2. Keep the existing graph-disabled default for huge imports
-3. Measure peak RAM again
+1. Any deeper hash-table redesign if the data shape changes
 
 Expected outcome:
 
-- lower memory use
-- better scaling for high-cardinality datasets
+- the completed branch should already be the safe baseline for coursework
+- the remaining future-only item is conditional on a different data shape
 
-## Phase 3: Faster ingest and query preparation
+## Latest Benchmarks
 
-1. Replace per-merge temporary vectors with one reusable sort buffer
-2. Evaluate radix sort while preserving full record ordering
-3. Lazy or parallel index building
-4. Memory-mapped `.dat` loading
+On the current branch and machine, cold CSV import with `saveCache=0` and `resumeCheckpoint=0` produced:
 
-Expected outcome:
-
-- faster finalize/load path
-
-## Phase 4: Bigger architectural changes
-
-1. Multi-threaded CSV parsing
-2. Partitioning
-3. Column-oriented storage
-4. Compression
-
-Expected outcome:
-
-- bigger long-term gains
-- much higher implementation complexity
+- `1M`, `radix-hybrid`: about `516 ms` total, `402 ms` CSV import, `70 ms` sort, `22 ms` index build
+- `2M`, `radix-hybrid`: about `2.1 s` total on a cold run, with all counts matching
+- `20M`, `radix-hybrid`: about `13.5 s` total, `10.3 s` CSV import, `2.0 s` sort, `0.48 s` index build
+- `20M`, `merge`: still much slower than radix-hybrid on the same data shape, so merge is a baseline for comparison, not the default
+- `20M` checkpoint resume: interrupted after the first `2M` snapshot, restarted with `resumedCheckpoint=true`, and completed with all record/unique counts matching
+- `20M` `.dat` cache load via memory map: about `1.8 s` binary load, `0.48 s` index build, with all counts matching
+- `1M`, forced `parallelCsv=1`: counts matched, but CSV import was slower than the default path on this machine, so parallel CSV parsing remains opt-in/very-large-file-only
 
 ---
 
@@ -705,20 +681,17 @@ Expected outcome:
 
 If the target is a course project with limited time, the best order is:
 
-1. remove full-snapshot checkpoint write amplification
-2. safe `reserve()` / pre-size support
-3. reusable merge-sort buffer
-4. safer size/index types
-5. reduce duplicate strings
-6. benchmark radix sort
-7. lazy or parallel index building
+1. keep the current completed branch as the baseline
+2. use the current memory-mapped `.dat` loader as the baseline for cache loads
+3. use the external/partitioned sort fallback when radix-hybrid would overrun memory headroom
+4. enable `parallelCsv=1` only for benchmarks or very large files where it beats the single-thread path
+5. redesign the hash table only if the data shape changes enough to justify it
 
 If the target is an aggressive production-scale system, then later add:
 
-1. multi-threaded parsing
-2. better on-disk format
-3. partitioning
-4. maybe a redesigned hash table
+1. better on-disk format
+2. broader partitioning
+3. maybe a redesigned hash table
 
 ---
 
@@ -791,7 +764,7 @@ For this repo, the fastest path to meaningful improvement is:
 6. reduce duplicated string memory
 7. measure again
 
-Only after that should we decide whether a heavier redesign like multi-thread parsing, open addressing, partitioning, or column storage is worth the cost.
+Only after that should we decide whether heavier redesigns like open addressing, broader partitioning, or column storage are worth the cost. The current multi-thread parser should stay opt-in/very-large-file-only unless benchmarks prove it wins.
 
 ---
 

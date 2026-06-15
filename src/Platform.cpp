@@ -29,7 +29,7 @@ bool replaceFileAtomic(const std::string& from, const std::string& to) {
 #else
   std::error_code ec;
   std::filesystem::rename(from, to, ec);
-  if (!ec) return true;
+  if (!ec) {return true;}
   std::filesystem::remove(to, ec);
   ec.clear();
   std::filesystem::rename(from, to, ec);
