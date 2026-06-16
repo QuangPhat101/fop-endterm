@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <windows.h>
 
@@ -18,6 +20,9 @@ constexpr size_t RADIX_TIE_GROUP_THRESHOLD = 8192;
 constexpr size_t AUTO_RADIX_THRESHOLD = 200000;
 constexpr size_t EXTERNAL_SORT_CHUNK_RECORDS = 2000000ULL;
 constexpr size_t AUTO_EXTERNAL_MIN_RECORDS = 30000000ULL;
+
+static_assert(std::is_trivially_copyable_v<DataRecords>,
+              "DataRecords must stay trivially copyable for fast block copies");
 
 bool recordLess(const DataRecords& a, const DataRecords& b) {
     if (a.timestamp != b.timestamp) {
@@ -267,6 +272,7 @@ bool externalPartitionedSort(Vector<DataRecords>& records) {
     }
 
     Vector<ExternalHeapNode> heap;
+    heap.reserve(runs.size());
     size_t outIndex = 0;
     for (size_t i = 0; i < runs.size(); i++) {
         externalHeapPush(heap, ExternalHeapNode{runs[i].current, i});
@@ -323,9 +329,11 @@ uint16_t radixKey(const DataRecords& record, int keyId) {
 }
 
 void copyRange(DataRecords* dst, const DataRecords* src, size_t start, size_t end) {
-    for (size_t i = start; i < end; i++) {
-        dst[i] = src[i];
+    size_t count = end - start;
+    if (count == 0) {
+        return;
     }
+    std::memcpy(dst + start, src + start, count * sizeof(DataRecords));
 }
 
 void radixPassRange(const DataRecords* src, DataRecords* dst, size_t start,
@@ -543,8 +551,14 @@ uint64_t RecordStorage::removeDuplicates() {
             }
         }
     }
-    Records.setSize(writeIndex + 1);
-    Records.shrinkToFit();
+    size_t newSize = writeIndex + 1;
+    size_t oldCapacity = Records.getCapacity();
+    Records.setSize(newSize);
+    size_t slack = oldCapacity > newSize ? oldCapacity - newSize : 0;
+    size_t minSlack = newSize / 8 + 1024;
+    if (slack > minSlack) {
+        Records.shrinkToFit();
+    }
     return mergedCount;
 }
 

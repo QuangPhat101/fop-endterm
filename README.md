@@ -13,7 +13,7 @@ data/
 ## Windows
 
 ```powershell
-g++ -O2 -DNDEBUG -Wall -std=c++23 src\*.cpp -o release\24120117.exe -lws2_32 -lpsapi
+g++ -O2 -DNDEBUG -ffunction-sections -fdata-sections "-Wl,--gc-sections" -s -std=c++23 src\*.cpp -o release\24120117.exe -lws2_32 -lpsapi
 .\release\24120117.exe
 ```
 
@@ -39,6 +39,9 @@ make linux
 ## Test
 
 ```powershell
+g++ -O2 -Wall -Wextra -std=c++23 -Isrc tests\anomaly_tests.cpp src\Halo.cpp src\RecordStorage.cpp src\idTable.cpp src\HashTable.cpp src\Platform.cpp -o release\anomaly_tests.exe -lpsapi
+.\release\anomaly_tests.exe
+
 g++ -O2 -DNDEBUG -Wall -std=c++23 -Isrc tests\parser_tests.cpp -o release\parser_tests.exe
 .\release\parser_tests.exe
 

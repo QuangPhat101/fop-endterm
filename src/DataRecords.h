@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <iostream>
 
-enum event_Type {
+enum event_Type : uint8_t {
     LOGIN,
     LOGOUT,
     TOKEN_REFRESH,
@@ -14,7 +14,7 @@ enum event_Type {
     UNKNOWN_EVENT
 };
 
-enum location {
+enum location : uint8_t {
     LOC_US,
     LOC_VN,
     LOC_JP,
@@ -38,11 +38,10 @@ struct DataRecords {
     int deviceID = -1;
     int appID = -1;
     int resourceID = -1;
+    uint32_t Count = 1;
     event_Type eventTypeTag = UNKNOWN_EVENT;
     location locationTag = UNKNOWN_LOCATION;
     uint64_t timestamp = 0;
-
-    uint64_t Count = 1;
 
     bool operator<=(const DataRecords& other) const {
         if (timestamp != other.timestamp) {
@@ -73,3 +72,5 @@ struct DataRecords {
                locationTag == other.locationTag;
     }
 };
+
+static_assert(sizeof(DataRecords) == 32, "DataRecords layout must stay compact");

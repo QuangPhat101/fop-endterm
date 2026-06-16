@@ -1,25 +1,24 @@
 #include "HashTable.h"
 
 #include <limits>
+#include <stdexcept>
 
-HashTable::HashTable(size_t initialBucketCount) {
-    bucketCount = initialBucketCount < 16 ? 16 : initialBucketCount;
+HashTable::HashTable(size_t initialSlotCount) {
+    slotCount = initialSlotCount < 16 ? 16 : initialSlotCount;
+    slotCount = nextSlotCount(slotCount - 1);
     itemCount = 0;
-    buckets = NULL;
+    slots = NULL;
 }
 
 HashTable::~HashTable() {
     clear();
 }
 
-void HashTable::initBuckets() {
-    if (buckets != NULL) {
+void HashTable::initSlots() {
+    if (slots != NULL) {
         return;
     }
-    buckets = new Node*[bucketCount];
-    for (size_t i = 0; i < bucketCount; i++) {
-        buckets[i] = NULL;
-    }
+    slots = new Slot[slotCount];
 }
 
 uint64_t HashTable::hashString(std::string_view key) const {
@@ -31,145 +30,145 @@ uint64_t HashTable::hashString(std::string_view key) const {
     return hash;
 }
 
-size_t HashTable::bucketIndex(uint64_t hash) const {
-    return static_cast<size_t>(hash % bucketCount);
+uint64_t HashTable::mixHash(uint64_t hash) const {
+    hash ^= hash >> 33;
+    hash *= 0xff51afd7ed558ccdULL;
+    hash ^= hash >> 33;
+    hash *= 0xc4ceb9fe1a85ec53ULL;
+    hash ^= hash >> 33;
+    return hash;
 }
 
-size_t HashTable::nextBucketCount(size_t current) const {
-    const size_t sizes[] = {262144, 524288, 1048576, 2097152, 4194304,
-                            8388608, 16777216, 33554432, 67108864};
-    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
-        if (sizes[i] > current) {
-            return sizes[i];
-        }
-    }
-    if (current > (std::numeric_limits<size_t>::max() - 1) / 2) {
-        return std::numeric_limits<size_t>::max();
-    }
-    return current * 2 + 1;
+size_t HashTable::slotIndex(uint64_t hash) const {
+    return static_cast<size_t>(mixHash(hash) & static_cast<uint64_t>(slotCount - 1));
 }
 
-void HashTable::rehash(size_t newBucketCount) {
-    initBuckets();
-    Node** oldBuckets = buckets;
-    size_t oldBucketCount = bucketCount;
+size_t HashTable::probeStep(uint64_t hash) const {
+    uint64_t mixed = mixHash(hash ^ 0x9e3779b97f4a7c15ULL);
+    return static_cast<size_t>((mixed | 1ULL) & static_cast<uint64_t>(slotCount - 1));
+}
 
-    bucketCount = newBucketCount;
-    buckets = new Node*[bucketCount];
-    for (size_t i = 0; i < bucketCount; i++) {
-        buckets[i] = NULL;
+size_t HashTable::nextSlotCount(size_t current) const {
+    size_t next = 16;
+    while (next <= current) {
+        if (next > std::numeric_limits<size_t>::max() / 2) {
+            throw std::length_error("HashTable qua lon");
+        }
+        next *= 2;
     }
+    return next;
+}
 
-    for (size_t i = 0; i < oldBucketCount; i++) {
-        Node* node = oldBuckets[i];
-        while (node != NULL) {
-            Node* next = node->next;
-            size_t index = bucketIndex(node->hash);
-            node->next = buckets[index];
-            buckets[index] = node;
-            node = next;
+size_t HashTable::slotCountForItems(size_t expectedItems) const {
+    if (expectedItems == 0) {
+        return 16;
+    }
+    if (expectedItems > (std::numeric_limits<size_t>::max() - 9) / 10) {
+        throw std::length_error("HashTable reserve qua lon");
+    }
+    size_t target = (expectedItems * 10 + 6) / 7;
+    if (target < 16) {
+        target = 16;
+    }
+    return nextSlotCount(target - 1);
+}
+
+void HashTable::rehash(size_t newSlotCount) {
+    initSlots();
+    Slot* oldSlots = slots;
+    size_t oldSlotCount = slotCount;
+
+    slotCount = newSlotCount < 16 ? 16 : newSlotCount;
+    slotCount = nextSlotCount(slotCount - 1);
+    slots = new Slot[slotCount];
+
+    for (size_t i = 0; i < oldSlotCount; i++) {
+        if (oldSlots[i].occupied) {
+            size_t index = slotIndex(oldSlots[i].hash);
+            size_t step = probeStep(oldSlots[i].hash);
+            while (slots[index].occupied) {
+                index = (index + step) & (slotCount - 1);
+            }
+            slots[index] = oldSlots[i];
         }
     }
 
-    delete[] oldBuckets;
+    delete[] oldSlots;
 }
 
 bool HashTable::find(std::string_view key, const Vector<string>& names,
                      int& value) const {
-    if (buckets == NULL) {
+    if (slots == NULL || itemCount == 0) {
         return false;
     }
 
     uint64_t hash = hashString(key);
-    size_t index = bucketIndex(hash);
-    Node* node = buckets[index];
-    while (node != NULL) {
-        if (node->hash == hash && node->value >= 0 &&
-            static_cast<size_t>(node->value) < names.size() &&
-            std::string_view(names[static_cast<size_t>(node->value)]) == key) {
-            value = node->value;
+    size_t index = slotIndex(hash);
+    size_t step = probeStep(hash);
+
+    for (size_t probe = 0; probe < slotCount; probe++) {
+        const Slot& slot = slots[index];
+        if (!slot.occupied) {
+            return false;
+        }
+        if (slot.hash == hash && slot.value >= 0 &&
+            static_cast<size_t>(slot.value) < names.size() &&
+            std::string_view(names[static_cast<size_t>(slot.value)]) == key) {
+            value = slot.value;
             return true;
         }
-        node = node->next;
+        index = (index + step) & (slotCount - 1);
     }
     return false;
 }
 
 void HashTable::insert(std::string_view key, const Vector<string>& names,
                        int value) {
-    initBuckets();
-    if ((itemCount + 1) * 4 > bucketCount * 3) {
-        rehash(nextBucketCount(bucketCount));
+    initSlots();
+    if ((itemCount + 1) * 10 > slotCount * 7) {
+        rehash(nextSlotCount(slotCount));
     }
 
     uint64_t hash = hashString(key);
-    size_t index = bucketIndex(hash);
-    Node* node = buckets[index];
-    while (node != NULL) {
-        if (node->hash == hash && node->value >= 0 &&
-            static_cast<size_t>(node->value) < names.size() &&
-            std::string_view(names[static_cast<size_t>(node->value)]) == key) {
-            node->value = value;
+    size_t index = slotIndex(hash);
+    size_t step = probeStep(hash);
+
+    for (size_t probe = 0; probe < slotCount; probe++) {
+        Slot& slot = slots[index];
+        if (!slot.occupied) {
+            slot.hash = hash;
+            slot.value = value;
+            slot.occupied = true;
+            itemCount++;
             return;
         }
-        node = node->next;
+        if (slot.hash == hash && slot.value >= 0 &&
+            static_cast<size_t>(slot.value) < names.size() &&
+            std::string_view(names[static_cast<size_t>(slot.value)]) == key) {
+            slot.value = value;
+            return;
+        }
+        index = (index + step) & (slotCount - 1);
     }
 
-    Node* newNode = new Node();
-    newNode->hash = hash;
-    newNode->value = value;
-    newNode->next = buckets[index];
-    buckets[index] = newNode;
-    itemCount++;
+    rehash(nextSlotCount(slotCount));
+    insert(key, names, value);
 }
 
 void HashTable::reserve(size_t expectedItems) {
-    size_t targetBuckets = 16;
-    if (expectedItems > 0) {
-        if (expectedItems > (std::numeric_limits<size_t>::max() - 2) / 4) {
-            targetBuckets = std::numeric_limits<size_t>::max();
-        } else {
-            targetBuckets = (expectedItems * 4 + 2) / 3;
-        }
-        if (targetBuckets < 16) {
-            targetBuckets = 16;
-        }
-    }
-
-    size_t newBucketCount = bucketCount;
-    while (newBucketCount < targetBuckets) {
-        size_t next = nextBucketCount(newBucketCount);
-        if (next <= newBucketCount) {
-            newBucketCount = targetBuckets;
-            break;
-        }
-        newBucketCount = next;
-    }
-
-    if (newBucketCount <= bucketCount) {
+    size_t newSlotCount = slotCountForItems(expectedItems);
+    if (newSlotCount <= slotCount) {
         return;
     }
-    if (buckets == NULL) {
-        bucketCount = newBucketCount;
+    if (slots == NULL) {
+        slotCount = newSlotCount;
     } else {
-        rehash(newBucketCount);
+        rehash(newSlotCount);
     }
 }
 
 void HashTable::clear() {
-    if (buckets == NULL) {
-        itemCount = 0;
-        return;
-    }
-    for (size_t i = 0; i < bucketCount; i++) {
-        Node* node = buckets[i];
-        while (node != NULL) {
-            Node* temp = node;
-            node = node->next;
-            delete temp;
-        }
-    }
-    delete[] buckets;
-    buckets = NULL;
+    delete[] slots;
+    slots = NULL;
     itemCount = 0;
 }

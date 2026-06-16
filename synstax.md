@@ -4,3 +4,8 @@
 4. Không được dùng: `vector`, `map`, `unordered_map`, `set`, thư viện đồ thị
 5. Được dùng: `std::string`, các hàm đọc/ghi file
 6. Chức năng nào thì nằm ở trong đó, ví dụ như các chức năng liên quan đến vector thì buộc nằm trong Vector.h, liên quan đến các hàm sort thì buộc bỏ trong Sort.h
+
+ko: 23s
+check + dat: 55s
+check: 50s
+dat: 30s

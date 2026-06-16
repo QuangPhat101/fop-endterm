@@ -37,11 +37,27 @@ struct AnomalyParams {
     string type;
     uint64_t n = 3;
     uint64_t windowSec = 3600;
+    uint64_t minGapSec = 2;
+    uint64_t minSpacingSec = 43200;
+    uint64_t minEvents = 6;
+    uint64_t maxCvPercent = 10;
+    uint64_t failureRatioPercent = 90;
     int startHour = 8;
     int endHour = 18;
     uint64_t sessionSec = 43200;
     uint64_t silenceSec = 86400;
     uint64_t burstSec = 3600;
+};
+
+struct AnomalyEvidence {
+    string eventType;
+    string user;
+    string device;
+    string app;
+    string resource;
+    string location;
+    uint64_t timestamp = 0;
+    uint64_t count = 1;
 };
 
 struct AnomalyResult {
@@ -53,8 +69,17 @@ struct AnomalyResult {
     string resource;
     string location;
     uint64_t timestamp = 0;
+    uint64_t endTimestamp = 0;
     uint64_t count = 0;
     string detail;
+    Vector<AnomalyEvidence> records;
+};
+
+struct TravelEstimate {
+    bool valid = false;
+    bool sharesBorder = false;
+    double distanceKm = 0.0;
+    uint64_t minimumSeconds = 0;
 };
 
 struct FinalizeMetrics {
@@ -109,8 +134,15 @@ class Halo {
                        const string& severity, const DataRecords& rec,
                        uint64_t count, const string& detail,
                        std::ostream* fullOutput) const;
+    void appendAnomalyGroup(Vector<AnomalyResult>& results, int maxResults,
+                            uint64_t& total, const string& type,
+                            const string& severity, const DataRecords& anchor,
+                            uint64_t count, const string& detail,
+                            const Vector<DataRecords>& evidence,
+                            std::ostream* fullOutput) const;
+    AnomalyEvidence makeEvidence(const DataRecords& rec) const;
     int timezoneOffsetMinutes(location loc) const;
-    uint64_t minTravelSeconds(location from, location to) const;
+    TravelEstimate estimateTravel(location from, location to) const;
 
    public:
     Halo();

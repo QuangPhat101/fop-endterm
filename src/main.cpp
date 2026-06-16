@@ -285,8 +285,7 @@ long long fileTimeKey(const std::string& path) {
 }
 
 bool replaceFile(const std::string& from, const std::string& to) {
-    return MoveFileExA(from.c_str(), to.c_str(),
-                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    return MoveFileExA(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
 }
 
 void deleteImportCheckpoint(const std::string& checkpointFile) {
@@ -672,7 +671,7 @@ int main() {
                 // Try serving local index.html
                 std::ifstream htmlFile("index.html");
                 if (!htmlFile.is_open()) {
-                    htmlFile.open("index.html");
+                    htmlFile.open("src/index.html");
                 }
                 if (htmlFile.is_open()) {
                     std::stringstream buffer;
@@ -1108,50 +1107,83 @@ int main() {
 
                     std::string outputFile = "";
                     std::ofstream fullOutput;
-                    if (output == "file") {
-                        fs::create_directories("./data/anomaly_results");
-                        outputFile = "./data/anomaly_results/anomaly_" + type + "_" +
-                                     std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + ".txt";
-                        fullOutput.open(outputFile, std::ios::trunc);
-                    }
+                    try {
+                        if (output == "file") {
+                            fs::create_directories("./data/anomaly_results");
+                            outputFile = "./data/anomaly_results/anomaly_" + type + "_" +
+                                         std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + ".txt";
+                            fullOutput.open(outputFile, std::ios::trunc);
+                            if (!fullOutput.is_open()) {
+                                throw std::runtime_error("Khong the mo file de ghi ket qua: " + outputFile);
+                            }
+                        }
 
-                    Vector<AnomalyResult> results;
-                    int maxResults = 500;
-                    auto start = std::chrono::high_resolution_clock::now();
-                    uint64_t total = engine->detectAnomalies(
-                        params, results, maxResults, fullOutput.is_open() ? &fullOutput : nullptr);
-                    if (fullOutput.is_open()) {
-                        fullOutput.close();
-                    }
-                    auto end = std::chrono::high_resolution_clock::now();
-                    double timeMs = std::chrono::duration<double, std::milli>(end - start).count();
+                        Vector<AnomalyResult> results;
+                        int maxResults = 500;
+                        auto start = std::chrono::high_resolution_clock::now();
+                        uint64_t total = engine->detectAnomalies(
+                            params, results, maxResults, fullOutput.is_open() ? &fullOutput : nullptr);
+                        if (fullOutput.is_open()) {
+                            fullOutput.close();
+                        }
+                        auto end = std::chrono::high_resolution_clock::now();
+                        double timeMs = std::chrono::duration<double, std::milli>(end - start).count();
 
-                    std::stringstream json;
-                    json << "{\n"
-                         << "  \"success\": true,\n"
-                         << "  \"type\": \"" << jsonEscape(type) << "\",\n"
-                         << "  \"totalCount\": " << total << ",\n"
-                         << "  \"previewCount\": " << results.size() << ",\n"
-                         << "  \"outputFile\": \"" << jsonEscape(outputFile) << "\",\n"
-                         << "  \"summary\": \"Detected " << total << " anomalies in " << timeMs << " ms\",\n"
-                         << "  \"timeMs\": " << timeMs << ",\n"
-                         << "  \"data\": [\n";
-                    for (size_t i = 0; i < results.size(); i++) {
-                        json << "    {\n"
-                             << "      \"type\": \"" << jsonEscape(results[i].type) << "\",\n"
-                             << "      \"severity\": \"" << jsonEscape(results[i].severity) << "\",\n"
-                             << "      \"user\": \"" << jsonEscape(results[i].user) << "\",\n"
-                             << "      \"device\": \"" << jsonEscape(results[i].device) << "\",\n"
-                             << "      \"app\": \"" << jsonEscape(results[i].app) << "\",\n"
-                             << "      \"resource\": \"" << jsonEscape(results[i].resource) << "\",\n"
-                             << "      \"location\": \"" << jsonEscape(results[i].location) << "\",\n"
-                             << "      \"timestamp\": " << results[i].timestamp << ",\n"
-                             << "      \"count\": " << results[i].count << ",\n"
-                             << "      \"detail\": \"" << jsonEscape(results[i].detail) << "\"\n"
-                             << "    }" << (i == results.size() - 1 ? "" : ",") << "\n";
+                        std::stringstream json;
+                        json << "{\n"
+                             << "  \"success\": true,\n"
+                             << "  \"type\": \"" << jsonEscape(type) << "\",\n"
+                             << "  \"totalCount\": " << total << ",\n"
+                             << "  \"previewCount\": " << results.size() << ",\n"
+                             << "  \"outputFile\": \"" << jsonEscape(outputFile) << "\",\n"
+                             << "  \"summary\": \"Detected " << total << " anomalies in " << timeMs << " ms\",\n"
+                             << "  \"timeMs\": " << timeMs << ",\n"
+                             << "  \"data\": [\n";
+                        for (size_t i = 0; i < results.size(); i++) {
+                            json << "    {\n"
+                                 << "      \"type\": \"" << jsonEscape(results[i].type) << "\",\n"
+                                 << "      \"severity\": \"" << jsonEscape(results[i].severity) << "\",\n"
+                                 << "      \"user\": \"" << jsonEscape(results[i].user) << "\",\n"
+                                 << "      \"device\": \"" << jsonEscape(results[i].device) << "\",\n"
+                                 << "      \"app\": \"" << jsonEscape(results[i].app) << "\",\n"
+                                 << "      \"resource\": \"" << jsonEscape(results[i].resource) << "\",\n"
+                                 << "      \"location\": \"" << jsonEscape(results[i].location) << "\",\n"
+                                 << "      \"timestamp\": " << results[i].timestamp << ",\n"
+                                 << "      \"count\": " << results[i].count << ",\n"
+                                 << "      \"detail\": \"" << jsonEscape(results[i].detail) << "\"";
+                            if (!results[i].records.isEmpty()) {
+                                json << ",\n      \"records\": [\n";
+                                for (size_t j = 0; j < results[i].records.size(); j++) {
+                                    json << "        {\n"
+                                         << "          \"eventType\": \"" << jsonEscape(results[i].records[j].eventType) << "\",\n"
+                                         << "          \"user\": \"" << jsonEscape(results[i].records[j].user) << "\",\n"
+                                         << "          \"device\": \"" << jsonEscape(results[i].records[j].device) << "\",\n"
+                                         << "          \"app\": \"" << jsonEscape(results[i].records[j].app) << "\",\n"
+                                         << "          \"resource\": \"" << jsonEscape(results[i].records[j].resource) << "\",\n"
+                                         << "          \"location\": \"" << jsonEscape(results[i].records[j].location) << "\",\n"
+                                         << "          \"timestamp\": " << results[i].records[j].timestamp << ",\n"
+                                         << "          \"timestampUtc\": \"" << jsonEscape(formatUtcEpochText(results[i].records[j].timestamp)) << "\"\n"
+                                         << "        }" << (j == results[i].records.size() - 1 ? "" : ",") << "\n";
+                                }
+                                json << "      ]\n";
+                            } else {
+                                json << "\n";
+                            }
+                            json << "    }" << (i == results.size() - 1 ? "" : ",") << "\n";
+                        }
+                        json << "  ]\n}";
+                        responseBody = json.str();
+                    } catch (const std::exception& e) {
+                        if (fullOutput.is_open()) {
+                            fullOutput.close();
+                        }
+                        responseBody = jsonError(std::string("Loi he thong: ") + e.what());
+                    } catch (...) {
+                        if (fullOutput.is_open()) {
+                            fullOutput.close();
+                        }
+                        responseBody = jsonError("Loi he thong khong xac dinh.");
                     }
-                    json << "  ]\n}";
-                    responseBody = json.str();
                 }
 
                 responseHeader =

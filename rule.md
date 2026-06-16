@@ -47,10 +47,10 @@
 - **Tham số**: Giờ bắt đầu / kết thúc ca làm việc (mặc định 8–18)
 
 #### A5. Hành vi địa lý — Xuất hiện ở nhiều quốc gia bất hợp lý
-- **Logic**: Hai event liên tiếp của cùng user ở 2 quốc gia X → Y, mà thời gian di chuyển thực tế không đủ
-- **Xét biên giới**: Các cặp quốc gia liền kề (VN–TH, DE–FR, ...) có thể cho phép khoảng cách ngắn hơn; các cặp cần bay (VN–US, CN–AU...) yêu cầu tối thiểu vài giờ (xét theo tốc độ máy bay và khoảng cách thực tế, thêm 1 phần ddeer lưu khoảng cách giữa các nước có trong location)
-- **Tham số**: Bảng khoảng cách / thời gian tối thiểu giữa các quốc gia (hardcode hoặc cho nhập)
-- **Lưu ý từ note**: Xét phần biên giới, khoảng cách thực tế, thời gian bay tối thiểu
+- **Logic**: Hai event liên tiếp của cùng user ở 2 quốc gia X → Y. Nếu hai quốc gia không có biên giới chung, dùng tọa độ đại diện và công thức Haversine để tính khoảng cách đường chim bay
+- **Thời gian tối thiểu**: `khoảng cách / 900 km/h + 2 giờ` cho thủ tục sân bay, cất cánh và hạ cánh
+- **Xét biên giới**: Các cặp quốc gia có biên giới chung trong tập dữ liệu được xem là khả thi theo yêu cầu, không phát cảnh báo A5
+- **Kết quả**: Mỗi cảnh báo nhóm đúng 2 record liên tiếp, ghi quốc gia đi/đến, khoảng cách km, thời gian thực tế và thời gian tối thiểu
 
 #### A6. Hành vi địa lý — Đổi vị trí địa lý liên tục
 - **Logic**: Đếm số lần thay đổi `location` của user trong 1 ngày vượt ngưỡng N lần
@@ -70,7 +70,7 @@
 
 ---
 
-### NHÓM B — Nâng cao theo đề 
+### NHÓM B — Nâng cao theo đề
 
 #### B1. Cố đăng nhập (Brute force cuối cùng thành công)
 - **Logic**: N lần `FAILED_LOGIN` liên tiếp của cùng user, sau đó kết thúc bằng `LOGIN` thành công
@@ -153,17 +153,21 @@
 - **Tham số**: Khoảng thời gian tối đa giữa ADMIN_ACTION và DOWNLOAD (giây)
 
 #### D8. Phân bố hoạt động đều bất thường — Robot timing
-- **Logic**: Trong 1 ngày, các event của user phân bố đều theo thời gian (khoảng cách giữa các event gần bằng nhau, độ lệch chuẩn rất thấp)
+- **Logic**: Trong 1 ngày, tính hệ số biến thiên `CV = độ lệch chuẩn / khoảng cách trung bình` của các khoảng cách event theo từng user. Cảnh báo khi CV rất thấp và ngày đó có đủ số event tối thiểu
 - **Ý nghĩa**: Con người thao tác không đều — bot thì thao tác đúng giờ như cron job
-- **Tham số**: Ngưỡng độ lệch chuẩn tối thiểu chấp nhận được
+- **Tham số**: Số event tối thiểu trong ngày, ngưỡng CV tối đa (%)
+- **Cải tiến**: Dùng CV thay cho độ lệch chuẩn tuyệt đối để so sánh công bằng giữa bot chạy mỗi vài giây và bot chạy mỗi vài giờ
 
 #### D9. Tỉ lệ event_type bất thường
 - **Logic**: Với một user, tỉ lệ các loại event quá bất thường so với baseline của toàn hệ thống. Ví dụ: `LOGIN / ACCESS ratio` quá cao (login nhiều nhưng không access gì) hoặc `DOWNLOAD / ACCESS` quá cao
 - **Ý nghĩa**: Hành vi không giống người dùng thực — có thể là scraper, hoặc account bị dùng sai mục đích
 
-#### D10. Download tài nguyên chưa từng được access
-- **Logic**: User thực hiện `DOWNLOAD` resource X nhưng không có `ACCESS` resource X nào trước đó trong lịch sử (hoặc trong cùng phiên)
-- **Ý nghĩa**: Biết chính xác resource cần download mà không cần duyệt — dấu hiệu của insider info hoặc đã có target từ trước
+#### D10. Location tập trung FAILED_LOGIN bất thường
+- **Logic**: Trong cửa sổ thời gian T, một location có đủ số event tối thiểu và tỉ lệ `FAILED_LOGIN / tổng event` vượt ngưỡng phần trăm cấu hình
+- **Ý nghĩa**: Có thể là nguồn tấn công theo khu vực, proxy/VPN bị lạm dụng hoặc sự cố xác thực cục bộ
+- **Tham số**: Cửa sổ T, số event tối thiểu, tỉ lệ FAILED_LOGIN tối thiểu (%)
+- **Cải tiến**: Không cảnh báo chỉ vì 1–2 mẫu lỗi; mỗi đợt liên tục chỉ tạo một cảnh báo để tránh spam
+
 
 ---
 
@@ -183,6 +187,7 @@
 | D6 | Credential stuffing | Đề xuất mới | ★★ | ★★★★★ | +0.5–1đ |
 | D7 | Privilege escalation → Exfiltration | Đề xuất mới | ★★★ | ★★★★★ | +0.5–1đ |
 | D8 | Robot timing | Đề xuất mới | ★★★★ | ★★★★★ | +0.5–1đ |
+| D10 | Location tập trung FAILED_LOGIN | Đề xuất mới | ★★★ | ★★★★★ | +0.5–1đ |
 
 ---
 
@@ -202,11 +207,17 @@ BR  → UTC-3    RU  → UTC+3    TH  → UTC+7
 ```
 
 ### Thời gian di chuyển tối thiểu giữa các quốc gia (cho A5)
-- Liền kề (biên giới chung): VN–TH, DE–FR, DE–UK(không biên giới nhưng gần), CN–VN, CN–KR... → tối thiểu 2–4h
-- Bay ngắn (< 5h): VN–SG, VN–KR, SG–AU → tối thiểu 4–6h  
-- Bay dài (> 10h): VN–US, VN–BR, VN–DE, AU–US → tối thiểu 12–20h
+- Lưu một mảng tọa độ `(latitude, longitude)` đại diện cho mỗi quốc gia trong enum `location`
+- Dùng Haversine để ước lượng khoảng cách đường chim bay giữa hai quốc gia
+- Giả định vận tốc máy bay 900 km/h và cộng 2 giờ cho thủ tục/cất hạ cánh
+- Danh sách cặp có biên giới trong tập quốc gia hiện tại: US–CA, VN–CN, CN–IN, CN–RU, DE–FR
+- Đây là ước lượng tương đối ở cấp quốc gia, không thay thế dữ liệu sân bay/thành phố chính xác
 
 ### Output kết quả
 - Hỏi người dùng: in ra màn hình hay lưu file
-- Nếu lưu file: đặt tên theo timestamp + loại bất thường (vd: `anomaly_A1_20240415.txt`)
-- Format mỗi dòng kết quả: `[ANOMALY_TYPE] user=... device=... time=... detail=...`
+- Timestamp hiển thị theo UTC+0 ở định dạng ISO 8601
+- Mỗi kết quả là một incident có thời gian bắt đầu/kết thúc, lý do và danh sách records bằng chứng
+- Nếu lưu file: tên dạng `anomaly_<TYPE>_<UTC>_<milliseconds>.txt`
+- Nội dung file dùng JSON Lines: hai dòng đầu là metadata bắt đầu bằng `#`, sau đó mỗi dòng JSON là một incident độc lập
+- JSON Lines giúp đọc tuần tự file lớn, parse ổn định và không cần nạp toàn bộ file vào RAM
+- Lịch sử hiển thị type, thời gian tạo UTC, kích thước file; hỗ trợ xem lại, xóa từng file và xóa toàn bộ

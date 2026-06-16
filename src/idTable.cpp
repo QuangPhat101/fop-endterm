@@ -134,7 +134,7 @@ size_t IdTable::size() const {
 }
 
 void IdTable::reserve(size_t expectedUnique) {
-    if (expectedUnique <= 50000) {
+    if (expectedUnique > 0) {
         names.reserve(expectedUnique);
     }
     index.reserve(expectedUnique);

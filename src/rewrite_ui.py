@@ -1,15 +1,18 @@
 import sys
 import re
+import os
 
 def rewrite():
-    with open('index.html', 'r', encoding='utf-8') as f:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    input_path = os.path.join(script_dir, 'index.html')
+    with open(input_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
     script_match = re.search(r'<script>(.*?)</script>', content, re.DOTALL)
     if not script_match:
         print("Could not find script block")
         return
-    
+
     script_content = script_match.group(1)
 
     new_html = f"""<!doctype html>
@@ -217,10 +220,26 @@ input, select {{
   outline: none;
 }}
 
+select option {{
+  background: #121212;
+  color: var(--text);
+}}
+
 input:focus, select:focus {{
   background: rgba(255, 255, 255, 0.05);
   border-color: rgba(var(--accent-rgb), 0.4);
   box-shadow: 0 0 0 4px rgba(var(--accent-rgb), 0.1);
+}}
+
+input[type="datetime-local"]::-webkit-calendar-picker-indicator {{
+  filter: invert(1);
+  opacity: 0.5;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}}
+
+input[type="datetime-local"]::-webkit-calendar-picker-indicator:hover {{
+  opacity: 1;
 }}
 
 label {{
@@ -392,7 +411,7 @@ button {{
   margin-bottom: 32px;
 }}
 
-.workspace-pill {{
+.pill {{
   padding: 10px 20px;
   background: rgba(255, 255, 255, 0.02);
   border: 1px solid var(--panel-border);
@@ -402,12 +421,12 @@ button {{
   transition: var(--transition-fast);
 }}
 
-.workspace-pill:hover {{
+.pill:hover {{
   background: rgba(255, 255, 255, 0.05);
   color: var(--text);
 }}
 
-.workspace-pill.active {{
+.pill.active {{
   background: rgba(var(--accent-rgb), 0.1);
   border-color: rgba(var(--accent-rgb), 0.3);
   color: var(--accent);
@@ -637,7 +656,7 @@ button {{
   background: rgba(var(--accent-rgb), 0.05);
 }}
 
-.history-title {{
+.history-item-title {{
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -645,7 +664,7 @@ button {{
   font-size: 14px;
 }}
 
-.history-badge {{
+.history-item-badge {{
   font-size: 10px;
   padding: 4px 8px;
   background: rgba(255, 255, 255, 0.05);
@@ -653,7 +672,47 @@ button {{
   font-family: 'JetBrains Mono', monospace;
 }}
 
-.history-date {{ font-size: 12px; color: var(--text-muted); }}
+.history-item-date {{ font-size: 12px; color: var(--text-muted); }}
+
+.history-item-meta {{
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}}
+
+.history-item-actions {{
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}}
+
+.history-delete-btn {{
+  font-size: 11px;
+  color: var(--danger);
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  background: rgba(239, 68, 68, 0.06);
+  transition: var(--transition-fast);
+  cursor: pointer;
+}}
+
+.history-delete-btn:hover {{
+  background: rgba(239, 68, 68, 0.14);
+}}
+
+.history-empty {{
+  display: grid;
+  place-items: center;
+  height: 150px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-style: italic;
+  text-align: center;
+  padding: 20px;
+}}
 
 /* Results Table */
 .table-wrapper {{
@@ -721,6 +780,52 @@ tbody tr:hover {{
   color: var(--text-muted);
   font-size: 15px;
 }}
+
+.empty {{
+  display: grid;
+  min-height: 250px;
+  place-items: center;
+  padding: 40px;
+  color: var(--text-muted);
+  text-align: center;
+  font-size: 14px;
+}}
+
+.severity {{
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}}
+
+.severity.low {{
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--info);
+}}
+
+.severity.medium {{
+  background: rgba(245, 158, 11, 0.1);
+  color: var(--warning);
+}}
+
+.severity.high {{
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger);
+}}
+
+.severity.critical {{
+  background: rgba(239, 68, 68, 0.25);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+}}
+
+.number {{
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  font-weight: 500;
+}}
 </style>
 </head>
 <body>
@@ -747,14 +852,14 @@ tbody tr:hover {{
           <h2 style="font-size: 24px; margin-bottom: 8px;">Nạp dữ liệu</h2>
           <p style="color: var(--text-muted); font-size: 14px;">Chọn file CSV từ thư mục data</p>
         </div>
-        
+
         <label>
           File nguồn
           <select id="datasetSelect">
             <option value="">Đang tải danh sách...</option>
           </select>
         </label>
-        
+
         <div style="display: flex; flex-direction: column; gap: 12px;">
           <label class="check-label">
             <input id="saveCache" type="checkbox" checked>
@@ -762,21 +867,21 @@ tbody tr:hover {{
           </label>
           <label class="check-label">
             <input id="resumeCheckpoint" type="checkbox" checked>
-            <span style="margin-left: 12px;">Bật checkpoint phục hồi</span>
+            <span style="margin-left: 12px;">Bật checkpoint </span>
           </label>
         </div>
-        
+
         <button class="btn-primary" id="loadButton" type="button" style="margin-top: auto;">
           Nạp Workspace
           <div class="btn-icon-wrapper">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg>
           </div>
         </button>
-        
+
         <div class="load-rail" id="loadRail"><div class="load-rail-inner"></div></div>
       </div>
     </div>
-    
+
     <!-- Active Workspace & Stats -->
     <div class="col-span-8 card-shell" id="monitorPanel">
       <div class="card-core">
@@ -789,27 +894,27 @@ tbody tr:hover {{
             <span class="pulse"></span> Sẵn sàng
           </div>
         </div>
-        
+
         <div style="margin-bottom: 40px;">
           <span style="display: block; font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">WORKSPACE TRONG RAM</span>
           <div class="pill-list" id="loadedPills">
             <span style="color: var(--text-muted); font-style: italic; font-size: 14px;">Chưa có dữ liệu</span>
           </div>
         </div>
-        
+
         <div class="metric-group">
           <div class="metric">
-            <span class="metric-label">Thời gian Ingest</span>
+            <span class="metric-label">Thời gian xử lí</span>
             <span class="metric-value mono" id="perfTime">-</span>
           </div>
           <div class="metric">
-            <span class="metric-label">Memory Footprint</span>
+            <span class="metric-label">Ram sử dụng</span>
             <span class="metric-value mono" id="perfMemory">-</span>
           </div>
         </div>
       </div>
     </div>
-    
+
     <!-- Counters -->
     <div class="col-span-full" id="databaseStatsRow" style="display: none;">
       <div class="stat-grid">
@@ -818,6 +923,9 @@ tbody tr:hover {{
         <div class="stat-box"><span>Devices</span><strong class="mono" id="devices">0</strong></div>
         <div class="stat-box"><span>Apps</span><strong class="mono" id="apps">0</strong></div>
         <div class="stat-box"><span>Resources</span><strong class="mono" id="resources">0</strong></div>
+        <div class="stat-box"><span>Bị bỏ qua</span><strong class="mono" id="skipped">0</strong></div>
+        <div class="stat-box"><span>Đã thay thế</span><strong class="mono" id="replaced">0</strong></div>
+        <div class="stat-box"><span>Records trùng</span><strong class="mono" id="duplicates">0</strong></div>
       </div>
     </div>
   </section>
@@ -828,7 +936,7 @@ tbody tr:hover {{
       <button class="tab-btn active" id="btnQueryTab">Truy vấn Dữ liệu</button>
       <button class="tab-btn" id="btnAnomalyTab">Phát hiện Bất thường</button>
     </div>
-    
+
     <!-- QUERY TAB -->
     <div class="tab-pane active" id="paneQuery">
       <div class="query-split">
@@ -846,10 +954,10 @@ tbody tr:hover {{
             <span>Tài nguyên truy cập nhiều nhất</span>
           </button>
         </nav>
-        
+
         <div class="card-shell">
           <div class="card-core">
-            
+
             <div class="query-form-pane active" id="qform-user">
               <h3 style="font-size: 24px; margin-bottom: 32px;">Hành trình người dùng</h3>
               <div style="display: grid; gap: 24px;">
@@ -857,20 +965,22 @@ tbody tr:hover {{
                   User ID
                   <input id="userId" placeholder="Ví dụ: U00001">
                 </label>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
-                  <label>
-                    Thời gian bắt đầu
-                    <input id="userStart" type="datetime-local" step="1">
-                    <div class="time-presets" data-target-start="userStart" data-target-end="userEnd">
-                      <button type="button" class="preset-btn" data-preset="all">Tất cả</button>
-                      <button type="button" class="preset-btn" data-preset="24h">24h qua</button>
-                      <button type="button" class="preset-btn" data-preset="7d">7 ngày qua</button>
+                <div style="display: flex; flex-direction: column; gap: 12px;">
+                  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+                    <div>
+                      <span style="display: block; font-size: 14px; font-weight: 500; color: var(--text-muted); margin-bottom: 10px;">Thời gian bắt đầu</span>
+                      <input id="userStart" type="datetime-local" step="1">
                     </div>
-                  </label>
-                  <label>
-                    Thời gian kết thúc
-                    <input id="userEnd" type="datetime-local" step="1">
-                  </label>
+                    <div>
+                      <span style="display: block; font-size: 14px; font-weight: 500; color: var(--text-muted); margin-bottom: 10px;">Thời gian kết thúc</span>
+                      <input id="userEnd" type="datetime-local" step="1">
+                    </div>
+                  </div>
+                  <div class="time-presets" data-target-start="userStart" data-target-end="userEnd" style="margin-top: 4px;">
+                    <button type="button" class="preset-btn" data-preset="all">Tất cả</button>
+                    <button type="button" class="preset-btn" data-preset="24h">24h qua</button>
+                    <button type="button" class="preset-btn" data-preset="7d">7 ngày qua</button>
+                  </div>
                 </div>
                 <div style="margin-top: 16px;">
                   <button class="btn-primary" data-query="user" type="button">
@@ -888,20 +998,22 @@ tbody tr:hover {{
                   Resource ID
                   <input id="resourceId" placeholder="Ví dụ: R00001">
                 </label>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
-                  <label>
-                    Thời gian bắt đầu
-                    <input id="resourceStart" type="datetime-local" step="1">
-                    <div class="time-presets" data-target-start="resourceStart" data-target-end="resourceEnd">
-                      <button type="button" class="preset-btn" data-preset="all">Tất cả</button>
-                      <button type="button" class="preset-btn" data-preset="24h">24h qua</button>
-                      <button type="button" class="preset-btn" data-preset="7d">7 ngày qua</button>
+                <div style="display: flex; flex-direction: column; gap: 12px;">
+                  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+                    <div>
+                      <span style="display: block; font-size: 14px; font-weight: 500; color: var(--text-muted); margin-bottom: 10px;">Thời gian bắt đầu</span>
+                      <input id="resourceStart" type="datetime-local" step="1">
                     </div>
-                  </label>
-                  <label>
-                    Thời gian kết thúc
-                    <input id="resourceEnd" type="datetime-local" step="1">
-                  </label>
+                    <div>
+                      <span style="display: block; font-size: 14px; font-weight: 500; color: var(--text-muted); margin-bottom: 10px;">Thời gian kết thúc</span>
+                      <input id="resourceEnd" type="datetime-local" step="1">
+                    </div>
+                  </div>
+                  <div class="time-presets" data-target-start="resourceStart" data-target-end="resourceEnd" style="margin-top: 4px;">
+                    <button type="button" class="preset-btn" data-preset="all">Tất cả</button>
+                    <button type="button" class="preset-btn" data-preset="24h">24h qua</button>
+                    <button type="button" class="preset-btn" data-preset="7d">7 ngày qua</button>
+                  </div>
                 </div>
                 <div style="margin-top: 16px;">
                   <button class="btn-primary" data-query="resource" type="button">
@@ -911,24 +1023,26 @@ tbody tr:hover {{
                 </div>
               </div>
             </div>
-            
+
             <div class="query-form-pane" id="qform-top">
               <h3 style="font-size: 24px; margin-bottom: 32px;">Top 10 tài nguyên</h3>
               <div style="display: grid; gap: 24px;">
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
-                  <label>
-                    Thời gian bắt đầu
-                    <input id="topStart" type="datetime-local" step="1">
-                    <div class="time-presets" data-target-start="topStart" data-target-end="topEnd">
-                      <button type="button" class="preset-btn" data-preset="all">Tất cả</button>
-                      <button type="button" class="preset-btn" data-preset="24h">24h qua</button>
-                      <button type="button" class="preset-btn" data-preset="7d">7 ngày qua</button>
+                <div style="display: flex; flex-direction: column; gap: 12px;">
+                  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+                    <div>
+                      <span style="display: block; font-size: 14px; font-weight: 500; color: var(--text-muted); margin-bottom: 10px;">Thời gian bắt đầu</span>
+                      <input id="topStart" type="datetime-local" step="1">
                     </div>
-                  </label>
-                  <label>
-                    Thời gian kết thúc
-                    <input id="topEnd" type="datetime-local" step="1">
-                  </label>
+                    <div>
+                      <span style="display: block; font-size: 14px; font-weight: 500; color: var(--text-muted); margin-bottom: 10px;">Thời gian kết thúc</span>
+                      <input id="topEnd" type="datetime-local" step="1">
+                    </div>
+                  </div>
+                  <div class="time-presets" data-target-start="topStart" data-target-end="topEnd" style="margin-top: 4px;">
+                    <button type="button" class="preset-btn" data-preset="all">Tất cả</button>
+                    <button type="button" class="preset-btn" data-preset="24h">24h qua</button>
+                    <button type="button" class="preset-btn" data-preset="7d">7 ngày qua</button>
+                  </div>
                 </div>
                 <div style="margin-top: 16px;">
                   <button class="btn-primary" data-query="top" type="button">
@@ -943,7 +1057,7 @@ tbody tr:hover {{
         </div>
       </div>
     </div>
-    
+
     <!-- ANOMALY TAB -->
     <div class="tab-pane" id="paneAnomaly">
       <div class="anomaly-split">
@@ -951,7 +1065,7 @@ tbody tr:hover {{
           <div class="card-core">
             <span class="eyebrow-text">HALO ENGINE</span>
             <h2 style="font-size: 32px; margin-top: 8px;">Phân tích Bất thường</h2>
-            
+
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 40px;">
               <label>
                 Phân nhóm
@@ -967,11 +1081,11 @@ tbody tr:hover {{
                 <select id="anomalyType"></select>
               </label>
             </div>
-            
+
             <div class="anomaly-desc" id="anomalyDescription"></div>
-            
+
             <div class="param-grid" id="anomalyParams"></div>
-            
+
             <div style="margin-top: 32px;">
               <span style="font-size: 14px; font-weight: 500; color: var(--text-muted);">Định dạng kết xuất</span>
               <div class="radio-group">
@@ -985,7 +1099,7 @@ tbody tr:hover {{
                 </label>
               </div>
             </div>
-            
+
             <div style="margin-top: 40px; display: flex; align-items: center; gap: 24px;">
               <button class="btn-primary" id="anomalyButton" type="button">
                 Bắt đầu phân tích
@@ -995,19 +1109,22 @@ tbody tr:hover {{
             </div>
           </div>
         </div>
-        
+
         <div class="card-shell" style="max-height: 800px; overflow-y: auto;">
           <div class="card-core" style="padding: 24px;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
               <h3 style="font-size: 18px;">Lịch sử báo cáo</h3>
-              <button id="historyRefresh" style="background:transparent; color:var(--accent); font-size:13px; font-weight:500;">Làm mới</button>
+              <div style="display: flex; gap: 16px;">
+                <button id="historyRefresh" style="background:transparent; color:var(--accent); font-size:13px; font-weight:500;">Làm mới</button>
+                <button id="historyClear" style="background:transparent; color:var(--danger); font-size:13px; font-weight:500;">Xóa hết</button>
+              </div>
             </div>
             <div id="historyList"></div>
           </div>
         </div>
       </div>
     </div>
-    
+
   </section>
 
   <!-- RESULTS -->
@@ -1033,7 +1150,7 @@ tbody tr:hover {{
 </body>
 </html>"""
 
-    with open('index.html', 'w', encoding='utf-8') as f:
+    with open(input_path, 'w', encoding='utf-8') as f:
         f.write(new_html)
 
 if __name__ == '__main__':

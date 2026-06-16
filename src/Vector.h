@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstddef>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 template <typename T>
@@ -12,10 +14,23 @@ class Vector {
     size_t count;
     size_t capacity;
 
+    static constexpr size_t maxSafeCapacity() {
+        return std::numeric_limits<std::ptrdiff_t>::max() / sizeof(T);
+    }
+
     void resize(size_t newCapa) {
+        if (newCapa > maxSafeCapacity()) {
+            throw std::length_error("Vector allocation too large");
+        }
         T* newData = new T[newCapa];
-        for (size_t i = 0; i < count; i++) {
-            newData[i] = std::move(data[i]);
+        if constexpr (std::is_trivially_copyable_v<T>) {
+            if (count > 0) {
+                std::memcpy(newData, data, count * sizeof(T));
+            }
+        } else {
+            for (size_t i = 0; i < count; i++) {
+                newData[i] = std::move(data[i]);
+            }
         }
         delete[] data;
         data = newData;
@@ -29,6 +44,9 @@ class Vector {
         capacity = 0;
     }
     Vector(size_t capa) {
+        if (capa > maxSafeCapacity()) {
+            throw std::length_error("Vector allocation too large");
+        }
         capacity = capa;
         count = 0;
         data = (capacity > 0) ? new T[capacity] : nullptr;
@@ -39,11 +57,20 @@ class Vector {
         data = (capacity > 0) ? new T[capacity] : nullptr;
     }
     Vector(const Vector& other) {
+        if (other.capacity > maxSafeCapacity()) {
+            throw std::length_error("Vector allocation too large");
+        }
         count = other.count;
         capacity = other.capacity;
         data = (capacity > 0) ? new T[capacity] : nullptr;
-        for (size_t i = 0; i < count; i++) {
-            data[i] = other.data[i];
+        if constexpr (std::is_trivially_copyable_v<T>) {
+            if (count > 0) {
+                std::memcpy(data, other.data, count * sizeof(T));
+            }
+        } else {
+            for (size_t i = 0; i < count; i++) {
+                data[i] = other.data[i];
+            }
         }
     }
     Vector(Vector&& other) noexcept {
@@ -64,9 +91,18 @@ class Vector {
         if (this == &other) {
             return *this;
         }
+        if (other.capacity > maxSafeCapacity()) {
+            throw std::length_error("Vector allocation too large");
+        }
         T* newData = (other.capacity > 0) ? new T[other.capacity] : nullptr;
-        for (size_t i = 0; i < other.count; i++) {
-            newData[i] = other.data[i];
+        if constexpr (std::is_trivially_copyable_v<T>) {
+            if (other.count > 0) {
+                std::memcpy(newData, other.data, other.count * sizeof(T));
+            }
+        } else {
+            for (size_t i = 0; i < other.count; i++) {
+                newData[i] = other.data[i];
+            }
         }
         delete[] data;
         data = newData;
@@ -89,10 +125,13 @@ class Vector {
     }
     void pushBack(const T& value) {
         if (count == capacity) {
-            if (capacity > std::numeric_limits<size_t>::max() / 2) {
+            if (capacity >= maxSafeCapacity()) {
                 throw std::length_error("Vector capacity overflow");
             }
             size_t newCapa = (capacity == 0) ? 10 : capacity * 2;
+            if (newCapa > maxSafeCapacity()) {
+                newCapa = maxSafeCapacity();
+            }
             resize(newCapa);
         }
         data[count] = value;
@@ -100,10 +139,13 @@ class Vector {
     }
     void pushBack(T&& value) {
         if (count == capacity) {
-            if (capacity > std::numeric_limits<size_t>::max() / 2) {
+            if (capacity >= maxSafeCapacity()) {
                 throw std::length_error("Vector capacity overflow");
             }
             size_t newCapa = (capacity == 0) ? 10 : capacity * 2;
+            if (newCapa > maxSafeCapacity()) {
+                newCapa = maxSafeCapacity();
+            }
             resize(newCapa);
         }
         data[count] = std::move(value);

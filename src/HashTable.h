@@ -8,26 +8,29 @@
 #include "Vector.h"
 using std::string;
 
-struct Node {
-    uint64_t hash;
-    int value;
-    Node* next;
-};
-
 class HashTable {
    private:
-    Node** buckets;
-    size_t bucketCount;
+    struct Slot {
+        uint64_t hash = 0;
+        int value = -1;
+        bool occupied = false;
+    };
+
+    Slot* slots;
+    size_t slotCount;
     size_t itemCount;
 
     uint64_t hashString(std::string_view key) const;
-    size_t bucketIndex(uint64_t hash) const;
-    void initBuckets();
-    void rehash(size_t newBucketCount);
-    size_t nextBucketCount(size_t current) const;
+    uint64_t mixHash(uint64_t hash) const;
+    size_t slotIndex(uint64_t hash) const;
+    size_t probeStep(uint64_t hash) const;
+    void initSlots();
+    void rehash(size_t newSlotCount);
+    size_t nextSlotCount(size_t current) const;
+    size_t slotCountForItems(size_t expectedItems) const;
 
    public:
-    explicit HashTable(size_t bucketCount = 262144);
+    explicit HashTable(size_t initialSlotCount = 262144);
     ~HashTable();
 
     HashTable(const HashTable& other) = delete;
