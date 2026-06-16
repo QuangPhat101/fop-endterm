@@ -9,8 +9,8 @@
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
-#include <windows.h>
 
+#include "Platform.h"
 #include "Sort.h"
 
 namespace {
@@ -66,12 +66,7 @@ bool recordTieLess(const DataRecords& a, const DataRecords& b) {
 }
 
 uint64_t availablePhysicalMemoryBytes() {
-    MEMORYSTATUSEX status;
-    status.dwLength = sizeof(status);
-    if (!GlobalMemoryStatusEx(&status)) {
-        return 0;
-    }
-    return status.ullAvailPhys;
+    return platform::availablePhysicalMemoryBytes();
 }
 
 bool shouldUseExternalPartitionedSort(size_t recordCount) {
@@ -102,7 +97,7 @@ std::filesystem::path makeExternalSortRunPath(size_t runIndex) {
         return {};
     }
 
-    std::string name = "halo_extsort_" + std::to_string(GetCurrentProcessId()) + "_" +
+    std::string name = "halo_extsort_" + std::to_string(platform::currentProcessId()) + "_" +
                        std::to_string(runIndex) + ".bin";
     return tempDir / name;
 }

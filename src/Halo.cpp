@@ -1,7 +1,5 @@
 #include "Halo.h"
 
-#include <windows.h>
-
 #include <chrono>
 #include <array>
 #include <cmath>
@@ -13,6 +11,8 @@
 #include <sstream>
 #include <thread>
 #include <utility>
+
+#include "Platform.h"
 
 namespace {
 constexpr uint32_t HALO_BINARY_MAGIC = 0x48414C4F;
@@ -72,128 +72,30 @@ string formatUtcEpochText(uint64_t epochSeconds) {
     return out.str();
 }
 
-class BinaryMappedReader {
-   private:
-    HANDLE fileHandle = INVALID_HANDLE_VALUE;
-    HANDLE mappingHandle = NULL;
-    const unsigned char* begin = nullptr;
-    const unsigned char* cursor = nullptr;
-    const unsigned char* end = nullptr;
-
-   public:
-    explicit BinaryMappedReader(const string& filename) {
-        fileHandle = CreateFileA(filename.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
-                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (fileHandle == INVALID_HANDLE_VALUE) {
-            return;
-        }
-
-        LARGE_INTEGER size;
-        if (!GetFileSizeEx(fileHandle, &size) || size.QuadPart < 0 ||
-            static_cast<unsigned long long>(size.QuadPart) >
-                static_cast<unsigned long long>(std::numeric_limits<size_t>::max())) {
-            CloseHandle(fileHandle);
-            fileHandle = INVALID_HANDLE_VALUE;
-            return;
-        }
-
-        mappingHandle = CreateFileMappingA(fileHandle, NULL, PAGE_READONLY, 0, 0, NULL);
-        if (mappingHandle == NULL) {
-            CloseHandle(fileHandle);
-            fileHandle = INVALID_HANDLE_VALUE;
-            return;
-        }
-
-        begin = static_cast<const unsigned char*>(
-            MapViewOfFile(mappingHandle, FILE_MAP_READ, 0, 0, 0));
-        if (begin == nullptr) {
-            CloseHandle(mappingHandle);
-            mappingHandle = NULL;
-            CloseHandle(fileHandle);
-            fileHandle = INVALID_HANDLE_VALUE;
-            return;
-        }
-
-        cursor = begin;
-        end = begin + static_cast<size_t>(size.QuadPart);
+bool parseResourceSequenceKey(const string& resourceName, uint64_t& key) {
+    if (resourceName.size() <= 1 || resourceName[0] != 'R') {
+        return false;
     }
-
-    ~BinaryMappedReader() {
-        if (begin != nullptr) {
-            UnmapViewOfFile(begin);
-        }
-        if (mappingHandle != NULL) {
-            CloseHandle(mappingHandle);
-        }
-        if (fileHandle != INVALID_HANDLE_VALUE) {
-            CloseHandle(fileHandle);
-        }
-    }
-
-    bool isOpen() const {
-        return begin != nullptr;
-    }
-
-    template <typename T>
-    bool readPod(T& out) {
-        return readBytes(&out, sizeof(T));
-    }
-
-    bool readBytes(void* dst, size_t bytes) {
-        if (bytes == 0) {
-            return true;
-        }
-        if (static_cast<size_t>(end - cursor) < bytes) {
+    uint64_t value = 0;
+    for (size_t i = 1; i < resourceName.size(); i++) {
+        unsigned char c = static_cast<unsigned char>(resourceName[i]);
+        if (c < '0' || c > '9') {
             return false;
         }
-        std::memcpy(dst, cursor, bytes);
-        cursor += bytes;
-        return true;
-    }
-};
-
-class BinaryFileReader {
-   private:
-    HANDLE fileHandle = INVALID_HANDLE_VALUE;
-
-   public:
-    explicit BinaryFileReader(const string& filename) {
-        fileHandle = CreateFileA(filename.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
-                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    }
-
-    ~BinaryFileReader() {
-        if (fileHandle != INVALID_HANDLE_VALUE) {
-            CloseHandle(fileHandle);
+        uint64_t digit = static_cast<uint64_t>(c - '0');
+        if (value > (std::numeric_limits<uint64_t>::max() - digit) / 10ULL) {
+            return false;
         }
+        value = value * 10ULL + digit;
     }
+    key = value;
+    return true;
+}
 
-    bool isOpen() const {
-        return fileHandle != INVALID_HANDLE_VALUE;
-    }
-
-    template <typename T>
-    bool readPod(T& out) {
-        DWORD read = 0;
-        return ReadFile(fileHandle, &out, sizeof(T), &read, NULL) &&
-               read == sizeof(T);
-    }
-
-    bool readBytes(void* dst, size_t bytes) {
-        char* ptr = reinterpret_cast<char*>(dst);
-        DWORD read = 0;
-        while (bytes > 0) {
-            DWORD chunk = bytes > 64ULL * 1024ULL * 1024ULL ? 64U * 1024U * 1024U
-                                                            : static_cast<DWORD>(bytes);
-            if (!ReadFile(fileHandle, ptr, chunk, &read, NULL) || read != chunk) {
-                return false;
-            }
-            ptr += read;
-            bytes -= read;
-        }
-        return true;
-    }
-};
+bool isResourceAccessEvent(event_Type eventType) {
+    return eventType == ACCESS || eventType == DOWNLOAD ||
+           eventType == OPEN_APP || eventType == ADMIN_ACTION;
+}
 
 template <typename Getter>
 void buildSingleIndex(const Vector<DataRecords>& recs, size_t recCount,
@@ -495,95 +397,14 @@ void Halo::finalizeLoading() {
         std::chrono::duration<double, std::milli>(clock::now() - finalizeStart).count();
 }
 
-static bool writeRawAll(HANDLE hFile, const void* data, unsigned long long bytes) {
-    const char* ptr = reinterpret_cast<const char*>(data);
-    DWORD written = 0;
-    while (bytes > 0) {
-        DWORD chunk = bytes > 64ULL * 1024ULL * 1024ULL ? 64U * 1024U * 1024U : (DWORD)bytes;
-        if (!WriteFile(hFile, ptr, chunk, &written, NULL) || written != chunk) {
-            return false;
-        }
-        ptr += written;
-        bytes -= written;
-    }
-    return true;
-}
-
-class BufferedBinaryWriter {
-   private:
-    HANDLE hFile;
-    char* buffer;
-    size_t capacity;
-    size_t used;
-    bool ok;
-
-   public:
-    explicit BufferedBinaryWriter(HANDLE fileHandle, size_t bufferBytes = 4ULL * 1024ULL * 1024ULL) {
-        hFile = fileHandle;
-        capacity = bufferBytes;
-        used = 0;
-        ok = true;
-        buffer = capacity > 0 ? new char[capacity] : nullptr;
-    }
-
-    ~BufferedBinaryWriter() {
-        delete[] buffer;
-    }
-
-    bool flush() {
-        if (!ok) {
-            return false;
-        }
-        if (used == 0) {
-            return true;
-        }
-        ok = writeRawAll(hFile, buffer, static_cast<unsigned long long>(used));
-        used = 0;
-        return ok;
-    }
-
-    bool writeBytes(const void* data, size_t bytes) {
-        if (!ok) {
-            return false;
-        }
-        if (bytes == 0) {
-            return true;
-        }
-        if (bytes > capacity) {
-            if (!flush()) {
-                return false;
-            }
-            ok = writeRawAll(hFile, data, static_cast<unsigned long long>(bytes));
-            return ok;
-        }
-        if (used + bytes > capacity) {
-            if (!flush()) {
-                return false;
-            }
-        }
-        std::memcpy(buffer + used, data, bytes);
-        used += bytes;
-        return true;
-    }
-
-    template <typename T>
-    bool writePod(const T& value) {
-        return writeBytes(&value, sizeof(value));
-    }
-};
-
 bool Halo::saveToBinary(const string& filename) const {
-    HANDLE hFile = CreateFileA(filename.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) {
+    platform::BinaryFileWriter writer(filename);
+    if (!writer.isOpen()) {
         return false;
     }
-
-    BufferedBinaryWriter writer(hFile);
     uint32_t magic = HALO_BINARY_MAGIC;
     uint32_t version = HALO_BINARY_VERSION;
     if (!writer.writePod(magic) || !writer.writePod(version)) {
-        CloseHandle(hFile);
         return false;
     }
 
@@ -619,7 +440,6 @@ bool Halo::saveToBinary(const string& filename) const {
               writer.writePod(duplicateMergedCount);
 
     if (records.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
-        CloseHandle(hFile);
         return false;
     }
     int recSize = static_cast<int>(records.size());
@@ -630,8 +450,6 @@ bool Halo::saveToBinary(const string& filename) const {
         ok = writer.writeBytes(recs.rawData(), recordBytes);
     }
     ok = ok && writer.flush();
-
-    CloseHandle(hFile);
     return ok;
 }
 
@@ -766,7 +584,7 @@ bool Halo::loadFromBinary(const string& filename, bool rebuildGraph) {
     };
 
     {
-        BinaryMappedReader mappedReader(filename);
+        platform::BinaryMappedReader mappedReader(filename);
         if (mappedReader.isOpen()) {
             if (loadFromReader(mappedReader)) {
                 return true;
@@ -775,7 +593,7 @@ bool Halo::loadFromBinary(const string& filename, bool rebuildGraph) {
         }
     }
 
-    BinaryFileReader fileReader(filename);
+    platform::BinaryFileReader fileReader(filename);
     if (!fileReader.isOpen()) {
         return false;
     }
@@ -1441,6 +1259,56 @@ uint64_t Halo::detectAnomalies(const AnomalyParams& params, Vector<AnomalyResult
         return total;
     }
 
+
+    if (type == "E1") {
+        for (size_t u = 0; u < users.size(); u++) {
+            uint64_t microSessionCount = 0;
+            Vector<DataRecords> evidence;
+            
+            bool inSession = false;
+            uint64_t loginTime = 0;
+            bool hasAccess = false;
+            Vector<DataRecords> currentSessionEvents;
+            
+            for (int p = userOffsets[u]; p < userOffsets[u + 1]; p++) {
+                const DataRecords& rec = recs[userRecordIndices[p]];
+                
+                if (rec.eventTypeTag == LOGIN) {
+                    inSession = true;
+                    loginTime = rec.timestamp;
+                    hasAccess = false;
+                    currentSessionEvents.clear();
+                    currentSessionEvents.pushBack(rec);
+                } else if (inSession) {
+                    currentSessionEvents.pushBack(rec);
+                    if (rec.eventTypeTag == ACCESS || rec.eventTypeTag == DOWNLOAD) {
+                        hasAccess = true;
+                    }
+                    if (rec.eventTypeTag == LOGOUT) {
+                        uint64_t duration = rec.timestamp >= loginTime ? rec.timestamp - loginTime : 0;
+                        if (duration <= params.maxDurationSec && hasAccess) {
+                            microSessionCount++;
+                            for (size_t i = 0; i < currentSessionEvents.size(); i++) {
+                                evidence.pushBack(currentSessionEvents[i]);
+                            }
+                        }
+                        inSession = false;
+                    }
+                }
+            }
+            
+            if (microSessionCount > params.n) {
+                std::ostringstream detail;
+                detail << "Phát hiện " << microSessionCount << " phiên làm việc siêu ngắn (<= " 
+                       << params.maxDurationSec << " giây) có thực hiện truy cập dữ liệu.";
+                // We use the last event as the main marker
+                appendAnomalyGroup(results, maxResults, total, "E1", "high", evidence[evidence.size()-1],
+                                   microSessionCount, detail.str(), evidence, fullOutput);
+            }
+        }
+        return total;
+    }
+
     if (type == "A9") {
         for (size_t u = 0; u < users.size(); u++) {
             bool inSession = false;
@@ -1679,6 +1547,79 @@ uint64_t Halo::detectAnomalies(const AnomalyParams& params, Vector<AnomalyResult
                 lastRecord = rec;
             }
             reportDay();
+        }
+        return total;
+    }
+
+    if (type == "D11") {
+        const uint64_t totalResources = static_cast<uint64_t>(resources.size());
+        if (totalResources < 2) {
+            return total;
+        }
+
+        uint64_t percent = params.coveragePercent;
+        if (percent == 0) {
+            percent = 1;
+        }
+        if (percent > 100) {
+            percent = 100;
+        }
+
+        uint64_t required = (totalResources * percent + 99ULL) / 100ULL;
+        if (required < 2) {
+            required = 2;
+        }
+        if (required > totalResources) {
+            required = totalResources;
+        }
+
+        for (size_t d = 0; d < devices.size(); d++) {
+            Vector<DataRecords> chain;
+            uint64_t previousKey = 0;
+            bool hasPreviousKey = false;
+            bool incidentReported = false;
+
+            for (int p = deviceOffsets[d]; p < deviceOffsets[d + 1]; p++) {
+                const DataRecords& rec = recs[deviceRecordIndices[p]];
+                if (!isResourceAccessEvent(rec.eventTypeTag)) {
+                    continue;
+                }
+
+                uint64_t key = 0;
+                if (!parseResourceSequenceKey(resources.getName(rec.resourceID), key)) {
+                    chain.clear();
+                    hasPreviousKey = false;
+                    incidentReported = false;
+                    continue;
+                }
+
+                if (hasPreviousKey && key == previousKey + 1ULL) {
+                    chain.pushBack(rec);
+                } else {
+                    chain.clear();
+                    chain.pushBack(rec);
+                    incidentReported = false;
+                }
+
+                if (!incidentReported && chain.size() >= static_cast<size_t>(required)) {
+                    uint64_t actualPercent =
+                        (static_cast<uint64_t>(chain.size()) * 100ULL +
+                         totalResources - 1ULL) /
+                        totalResources;
+                    std::ostringstream detail;
+                    detail << chain.size() << "/" << totalResources
+                           << " resource được truy cập theo chuỗi mã tăng liên tiếp ("
+                           << actualPercent << "% tổng số resource, ngưỡng "
+                           << percent << "%)";
+                    appendAnomalyGroup(results, maxResults, total, "D11", "critical",
+                                       rec, chain.size(), detail.str(), chain,
+                                       fullOutput);
+                    incidentReported = true;
+                }
+
+                previousKey = key;
+                hasPreviousKey = true;
+            }
         }
         return total;
     }

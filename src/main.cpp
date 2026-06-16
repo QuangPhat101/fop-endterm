@@ -1,19 +1,9 @@
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#ifdef _MSC_VER
-#pragma comment(lib, "Ws2_32.lib")
-#endif
-
-#include <psapi.h>
-
 #include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -31,7 +21,7 @@ namespace fs = std::filesystem;
 
 const int IMPORT_CHUNK_ROWS = 2000000;
 const uint64_t DEFAULT_CHECKPOINT_ROWS = 2000000ULL;
-const int HALO_PORT = 24117;
+const int DEFAULT_HALO_PORT = 24117;
 
 struct DatasetLoadMetrics {
     double binaryLoadTimeMs = 0.0;
@@ -102,6 +92,57 @@ int getIntParam(const std::string& query, const std::string& key,
         return defaultValue;
     }
     return static_cast<int>(parsed);
+}
+
+bool parsePortText(const std::string& raw, int& port) {
+    uint64_t parsed = 0;
+    if (raw.empty() || !halo::parseUint64Strict(raw, parsed)) {
+        return false;
+    }
+    if (parsed == 0 || parsed > 65535ULL) {
+        return false;
+    }
+    port = static_cast<int>(parsed);
+    return true;
+}
+
+int resolveHaloPort(int argc, char* argv[]) {
+    int port = DEFAULT_HALO_PORT;
+
+    for (int i = 1; i < argc; i++) {
+        std::string raw = "";
+        std::string arg = (argv[i] != nullptr) ? argv[i] : "";
+
+        if (arg == "--port" && i + 1 < argc) {
+            i++;
+            raw = (argv[i] != nullptr) ? argv[i] : "";
+        } else if (arg.rfind("--port=", 0) == 0) {
+            raw = arg.substr(7);
+        } else if (i == 1) {
+            raw = arg;
+        }
+
+        if (!raw.empty()) {
+            if (parsePortText(raw, port)) {
+                return port;
+            }
+            std::cerr << "Canh bao: port tham so khong hop le, dung mac dinh "
+                      << DEFAULT_HALO_PORT << ".\n";
+            return DEFAULT_HALO_PORT;
+        }
+    }
+
+    const char* envPort = std::getenv("HALO_PORT");
+    if (envPort != nullptr) {
+        std::string raw = envPort;
+        if (parsePortText(raw, port)) {
+            return port;
+        }
+        std::cerr << "Canh bao: HALO_PORT khong hop le, dung mac dinh "
+                  << DEFAULT_HALO_PORT << ".\n";
+    }
+
+    return port;
 }
 
 SortMode parseSortModeParam(const std::string& query) {
@@ -240,6 +281,19 @@ std::string jsonError(const std::string& error) {
     return "{\"success\": false, \"error\": \"" + jsonEscape(error) + "\"}";
 }
 
+std::string formatUtcEpochText(uint64_t epochSeconds) {
+    std::time_t tt = static_cast<std::time_t>(epochSeconds);
+    std::tm tm{};
+#ifdef _WIN32
+    gmtime_s(&tm, &tt);
+#else
+    gmtime_r(&tt, &tm);
+#endif
+    std::ostringstream out;
+    out << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+    return out.str();
+}
+
 bool isBinaryCacheFresh(const std::string& csvFile, const std::string& binPath) {
     try {
         if (!fs::exists(csvFile) || !fs::exists(binPath)) {
@@ -285,7 +339,7 @@ long long fileTimeKey(const std::string& path) {
 }
 
 bool replaceFile(const std::string& from, const std::string& to) {
-    return MoveFileExA(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+    return platform::replaceFileAtomic(from, to);
 }
 
 void deleteImportCheckpoint(const std::string& checkpointFile) {
@@ -535,9 +589,11 @@ bool loadDatasetCompletely(Halo& engine, const std::string& csvFile,
     return false;
 }
 
-int main() {
+int main(int argc, char* argv[]) {
     // Set console code page to UTF-8 for clean Vietnamese logs
-    SetConsoleOutputCP(CP_UTF8);
+    platform::setConsoleUtf8();
+
+    int haloPort = resolveHaloPort(argc, argv);
 
     std::cout << "==================================================\n";
 
@@ -589,67 +645,32 @@ int main() {
         return engine;
     };
 
-    // 1. Initialize Winsock
-    WSADATA wsaData;
-    int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (iResult != 0) {
-        std::cerr << "WSAStartup that bai: " << iResult << "\n";
+    platform::HttpServer server;
+    std::string serverError;
+    if (!server.listenOn(haloPort, serverError)) {
+        std::cerr << serverError << "\n";
         return 1;
     }
 
-    // 2. Create Socket
-    SOCKET listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listenSocket == INVALID_SOCKET) {
-        std::cerr << "Tạo socket that bai: " << WSAGetLastError() << "\n";
-        WSACleanup();
-        return 1;
-    }
-
-    // Reuse address option
-    char optval = 1;
-    setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-
-    // 3. Bind
-    sockaddr_in service;
-    service.sin_family = AF_INET;
-    service.sin_addr.s_addr = INADDR_ANY;
-    service.sin_port = htons(HALO_PORT);
-
-    iResult = bind(listenSocket, (SOCKADDR*)&service, sizeof(service));
-    if (iResult == SOCKET_ERROR) {
-        std::cerr << "Bind that bai voi code: " << WSAGetLastError() << "\n";
-        closesocket(listenSocket);
-        WSACleanup();
-        return 1;
-    }
-
-    // 4. Listen
-    iResult = listen(listenSocket, SOMAXCONN);
-    if (iResult == SOCKET_ERROR) {
-        std::cerr << "Listen that bai voi code: " << WSAGetLastError() << "\n";
-        closesocket(listenSocket);
-        WSACleanup();
-        return 1;
-    }
-
-    std::cout << "\n[OK] Web Server dang chay tai: http://localhost:24117\n";
+    std::cout << "\n[OK] Web Server dang chay tai: http://localhost:"
+              << haloPort << "\n";
     std::cout << "[!] Vui long mo trinh duyet va truy cap dia chi tren de dung UI.\n";
     std::cout << "--------------------------------------------------\n";
 
     // 5. Server Loop
     while (true) {
-        SOCKET clientSocket = accept(listenSocket, NULL, NULL);
-        if (clientSocket == INVALID_SOCKET) {
-            std::cerr << "Accept that bai voi code: " << WSAGetLastError() << "\n";
+        std::string acceptError;
+        platform::TcpClient clientSocket = server.accept(acceptError);
+        if (!clientSocket.isValid()) {
+            std::cerr << acceptError << "\n";
             continue;
         }
 
         // Set a 1-second receive timeout to prevent hanging on keep-alive connections
-        DWORD timeoutVal = 1000;
-        setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeoutVal, sizeof(timeoutVal));
+        clientSocket.setReceiveTimeoutMs(1000);
 
         char recvbuf[4096];
-        int bytesReceived = recv(clientSocket, recvbuf, sizeof(recvbuf) - 1, 0);
+        int bytesReceived = clientSocket.receive(recvbuf, sizeof(recvbuf) - 1);
         if (bytesReceived > 0) {
             recvbuf[bytesReceived] = '\0';
             std::string requestStr(recvbuf);
@@ -834,9 +855,7 @@ int main() {
                     std::string checkpointFile = "./data/Checkpoint_" + fileParam + ".tmp";
 
                     // Measure Memory Before
-                    PROCESS_MEMORY_COUNTERS_EX pmc_before;
-                    GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc_before, sizeof(pmc_before));
-                    SIZE_T memBefore = pmc_before.PrivateUsage;
+                    double memBefore = platform::currentProcessPrivateMemoryMB();
 
                     // Measure Time Before
                     auto start_time = std::chrono::high_resolution_clock::now();
@@ -858,11 +877,9 @@ int main() {
                     loadTimeMs = std::chrono::duration<double, std::milli>(end_time - start_time).count();
 
                     // Measure Memory After
-                    PROCESS_MEMORY_COUNTERS_EX pmc_after;
-                    GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc_after, sizeof(pmc_after));
-                    SIZE_T memAfter = pmc_after.PrivateUsage;
+                    double memAfter = platform::currentProcessPrivateMemoryMB();
 
-                    memoryMB = (memAfter > memBefore) ? (double)(memAfter - memBefore) / (1024.0 * 1024.0) : 0.0;
+                    memoryMB = (memAfter > memBefore) ? (memAfter - memBefore) : 0.0;
 
                     if (success && !loadedFromDat) {
                         if (saveBinaryCache) {
@@ -1099,11 +1116,21 @@ int main() {
                     params.type = type;
                     params.n = getUintParam(query, "n", params.n);
                     params.windowSec = getUintParam(query, "windowSec", params.windowSec);
+                    params.minGapSec = getUintParam(query, "minGapSec", params.minGapSec);
+                    params.minSpacingSec = getUintParam(query, "minSpacingSec", params.minSpacingSec);
+                    params.minEvents = getUintParam(query, "minEvents", params.minEvents);
+                    params.maxCvPercent = getUintParam(query, "maxCvPercent", params.maxCvPercent);
+                    params.failureRatioPercent =
+                        getUintParam(query, "failureRatioPercent",
+                                     params.failureRatioPercent);
                     params.startHour = getIntParam(query, "startHour", params.startHour);
                     params.endHour = getIntParam(query, "endHour", params.endHour);
                     params.sessionSec = getUintParam(query, "sessionSec", params.sessionSec);
+                    params.maxDurationSec = getUintParam(query, "maxDurationSec", params.maxDurationSec);
                     params.silenceSec = getUintParam(query, "silenceSec", params.silenceSec);
                     params.burstSec = getUintParam(query, "burstSec", params.burstSec);
+                    params.coveragePercent =
+                        getUintParam(query, "coveragePercent", params.coveragePercent);
 
                     std::string outputFile = "";
                     std::ofstream fullOutput;
@@ -1111,7 +1138,7 @@ int main() {
                         if (output == "file") {
                             fs::create_directories("./data/anomaly_results");
                             outputFile = "./data/anomaly_results/anomaly_" + type + "_" +
-                                         std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + ".txt";
+                                         std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + ".jsonl";
                             fullOutput.open(outputFile, std::ios::trunc);
                             if (!fullOutput.is_open()) {
                                 throw std::runtime_error("Khong the mo file de ghi ket qua: " + outputFile);
@@ -1151,7 +1178,7 @@ int main() {
                                  << "      \"timestamp\": " << results[i].timestamp << ",\n"
                                  << "      \"count\": " << results[i].count << ",\n"
                                  << "      \"detail\": \"" << jsonEscape(results[i].detail) << "\"";
-                            if (!results[i].records.isEmpty()) {
+                            if (!results[i].records.empty()) {
                                 json << ",\n      \"records\": [\n";
                                 for (size_t j = 0; j < results[i].records.size(); j++) {
                                     json << "        {\n"
@@ -1206,7 +1233,7 @@ int main() {
                             const std::string filename = entry.path().filename().string();
                             const bool validName =
                                 filename.rfind("anomaly_", 0) == 0 &&
-                                entry.path().extension() == ".txt";
+                                entry.path().extension() == ".jsonl";
                             if (!entry.is_regular_file() || !validName) {
                                 continue;
                             }
@@ -1238,7 +1265,7 @@ int main() {
                     filename.find('/') == std::string::npos &&
                     filename.find('\\') == std::string::npos &&
                     filename.rfind("anomaly_", 0) == 0 &&
-                    fs::path(filename).extension() == ".txt";
+                    fs::path(filename).extension() == ".jsonl";
 
                 if (!validName) {
                     responseBody = jsonError("Ten file anomaly khong hop le.");
@@ -1336,16 +1363,12 @@ int main() {
             }
 
             // Send response back to the browser
-            send(clientSocket, responseHeader.c_str(), static_cast<int>(responseHeader.length()), 0);
-            send(clientSocket, responseBody.c_str(), static_cast<int>(responseBody.length()), 0);
+            clientSocket.sendAll(responseHeader.c_str(), responseHeader.length());
+            clientSocket.sendAll(responseBody.c_str(), responseBody.length());
         }
 
         // Graceful shutdown to prevent TCP reset/hang issues
-        shutdown(clientSocket, SD_SEND);
-        char discardBuf[1024];
-        while (recv(clientSocket, discardBuf, sizeof(discardBuf), 0) > 0) {}
-
-        closesocket(clientSocket);
+        clientSocket.drainAndClose();
     }
 
     // 6. Cleanup workspaces to prevent memory leaks
@@ -1353,8 +1376,5 @@ int main() {
         delete workspaces[i];
     }
 
-    // 7. Cleanup listening socket
-    closesocket(listenSocket);
-    WSACleanup();
     return 0;
 }

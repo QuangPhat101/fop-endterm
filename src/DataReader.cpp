@@ -5,12 +5,12 @@
 #include <filesystem>
 #include <iomanip>
 #include <thread>
-#include <windows.h>
 
 #include <string_view>
 #include <sstream>
 
 #include "ParseUtils.h"
+#include "Platform.h"
 
 namespace {
 constexpr int IMPORT_PROGRESS_ROWS = 1000000;
@@ -37,131 +37,6 @@ void logImportProgress(const char* phase, int processedRows, int acceptedRows,
     std::cout << out.str();
 }
 }  // namespace
-
-class Win32LineReader {
-   private:
-    HANDLE hFile;
-    char* buffer;
-    DWORD bufferCapacity;
-    DWORD bufferSize;
-    DWORD bufferOffset;
-    bool eof;
-    long long currentFilePos;
-
-   public:
-    explicit Win32LineReader(const std::string& path) {
-        buffer = nullptr;
-        hFile = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
-                            OPEN_EXISTING,
-                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
-                            NULL);
-        bufferCapacity = 8 * 1024 * 1024;
-        bufferSize = 0;
-        bufferOffset = 0;
-        eof = (hFile == INVALID_HANDLE_VALUE);
-        currentFilePos = 0;
-        if (!eof) {
-            try {
-                buffer = new char[bufferCapacity];
-            } catch (...) {
-                CloseHandle(hFile);
-                hFile = INVALID_HANDLE_VALUE;
-                eof = true;
-            }
-        }
-    }
-
-    ~Win32LineReader() {
-        if (hFile != INVALID_HANDLE_VALUE) {
-            CloseHandle(hFile);
-        }
-        delete[] buffer;
-    }
-
-    bool isOpen() const {
-        return hFile != INVALID_HANDLE_VALUE;
-    }
-
-    bool seek(long long offset) {
-        if (hFile == INVALID_HANDLE_VALUE) {
-            return false;
-        }
-
-        LARGE_INTEGER li;
-        li.QuadPart = offset;
-        LARGE_INTEGER newPos;
-        if (!SetFilePointerEx(hFile, li, &newPos, FILE_BEGIN)) {
-            return false;
-        }
-
-        bufferSize = 0;
-        bufferOffset = 0;
-        eof = false;
-        currentFilePos = offset;
-        return true;
-    }
-
-    long long tell() const {
-        if (hFile == INVALID_HANDLE_VALUE) {
-            return 0;
-        }
-        return currentFilePos - (bufferSize - bufferOffset);
-    }
-
-    bool readLine(std::string_view& line, std::string& scratch) {
-        if (eof && bufferOffset >= bufferSize) {
-            return false;
-        }
-
-        scratch.clear();
-        while (true) {
-            if (bufferOffset >= bufferSize) {
-                DWORD read = 0;
-                if (!ReadFile(hFile, buffer, bufferCapacity, &read, NULL) ||
-                    read == 0) {
-                    eof = true;
-                    bufferSize = 0;
-                    bufferOffset = 0;
-                    break;
-                }
-                bufferSize = read;
-                bufferOffset = 0;
-                currentFilePos += read;
-            }
-
-            const char* start = buffer + bufferOffset;
-            size_t available = static_cast<size_t>(bufferSize - bufferOffset);
-            const char* newline = static_cast<const char*>(std::memchr(start, '\n', available));
-            if (newline != nullptr) {
-                size_t segmentLength = static_cast<size_t>(newline - start);
-                bufferOffset += static_cast<DWORD>(segmentLength + 1);
-                if (scratch.empty()) {
-                    if (segmentLength > 0 && start[segmentLength - 1] == '\r') {
-                        segmentLength--;
-                    }
-                    line = std::string_view(start, segmentLength);
-                    return true;
-                }
-
-                scratch.append(start, segmentLength);
-                if (!scratch.empty() && scratch.back() == '\r') {
-                    scratch.pop_back();
-                }
-                line = scratch;
-                return true;
-            }
-
-            scratch.append(start, available);
-            bufferOffset = bufferSize;
-        }
-
-        if (!scratch.empty() && scratch.back() == '\r') {
-            scratch.pop_back();
-        }
-        line = scratch;
-        return !line.empty();
-    }
-};
 
 event_Type DataReader::parseEvent(std::string_view evStr, bool& valid) const {
     valid = true;
@@ -432,7 +307,7 @@ bool DataReader::processLine(Halo& engine, std::string_view line) {
 }
 
 void DataReader::readAll(Halo& engine) {
-    Win32LineReader file(filePath);
+    platform::LineReader file(filePath);
     if (!file.isOpen()) {
         std::cout << "Khong the mo file dataset!" << std::endl;
         return;
@@ -454,7 +329,7 @@ void DataReader::readAll(Halo& engine) {
               << "." << std::endl;
 }
 
-bool DataReader::readSomeParallel(Halo& engine, Win32LineReader& file, int maxRows,
+bool DataReader::readSomeParallel(Halo& engine, platform::LineReader& file, int maxRows,
                                   uint64_t fileSize, long long& nextOffset,
                                   int& acceptedRows) {
     std::string scratch;
@@ -546,7 +421,7 @@ bool DataReader::readSomeParallel(Halo& engine, Win32LineReader& file, int maxRo
 
 bool DataReader::readSome(Halo& engine, long long startOffset, int maxRows,
                           long long& nextOffset, int& acceptedRows) {
-    Win32LineReader file(filePath);
+    platform::LineReader file(filePath);
     acceptedRows = 0;
     nextOffset = startOffset;
 

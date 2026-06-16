@@ -45,8 +45,10 @@ struct AnomalyParams {
     int startHour = 8;
     int endHour = 18;
     uint64_t sessionSec = 43200;
+    uint64_t maxDurationSec = 5;
     uint64_t silenceSec = 86400;
     uint64_t burstSec = 3600;
+    uint64_t coveragePercent = 80;
 };
 
 struct AnomalyEvidence {

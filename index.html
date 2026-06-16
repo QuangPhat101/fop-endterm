@@ -299,20 +299,23 @@ button {
 
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
 }
 .stat-box {
-  padding: 20px;
+  padding: 16px;
   background: #ffffff;
   border: 1px solid var(--panel-border);
   border-radius: 12px;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  align-items: center;
+  text-align: center;
+  overflow: hidden;
 }
-.stat-box span { color: var(--text-muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
-.stat-box strong { font-size: 24px; font-weight: 600; color: var(--text); }
+.stat-box span { color: var(--text-muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.stat-box strong { font-size: 22px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 
 /* Tabs */
 .tabs-container {
@@ -562,6 +565,11 @@ details.anomaly-details[open] summary {
 .anomaly-nested-table tr:last-child td {
   border-bottom: none;
 }
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
 </style>
 </head>
 <body>
@@ -591,13 +599,23 @@ details.anomaly-details[open] summary {
             <span style="margin-left: 12px;">Lưu cache nhị phân (.dat)</span>
           </label>
           <label class="check-label">
-            <input id="resumeCheckpoint" type="checkbox">
+            <input id="resumeCheckpoint" type="checkbox" checked>
             <span style="margin-left: 12px;">Bật checkpoint</span>
           </label>
         </div>
 
-        <div class="option-note">
-          Nếu bật một trong hai tùy chọn này hoặc bật cả hai, tốc độ nạp có thể chậm hơn một chút nhưng quá trình xử lý sẽ ổn định và trơn tru hơn.
+        <div style="margin-top: 8px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 10px; padding: 16px; display: flex; gap: 12px; align-items: flex-start;">
+          <svg style="width: 20px; height: 20px; color: #2563eb; flex-shrink: 0; margin-top: 2px;" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+          </svg>
+          <div style="font-size: 13px; color: #1e3a8a; line-height: 1.6;">
+            <strong style="color: #1e40af; display: block; margin-bottom: 6px; font-size: 14px;">Khuyến khích bật cả 2 tuỳ chọn</strong>
+            Tuy sẽ chậm hơn ở lần nạp đầu tiên nhưng sẽ giúp an toàn và tối ưu thời gian ở những lần sau:
+            <ul style="margin-top: 8px; padding-left: 20px; display: flex; flex-direction: column; gap: 6px;">
+              <li><strong style="color: #1e40af;">Cache nhị phân (.dat):</strong> Giúp nạp lại workspace ở các lần sau gần như tức thì.</li>
+              <li><strong style="color: #1e40af;">Checkpoint:</strong> Giúp quá trình nạp file lớn an toàn hơn, nếu bị gián đoạn giữa chừng thì lần sau có thể tiếp tục nạp phần còn lại.</li>
+            </ul>
+          </div>
         </div>
 
         <button class="btn-primary" id="loadButton" type="button" style="margin-top: auto;">
@@ -634,11 +652,11 @@ details.anomaly-details[open] summary {
         <div class="metric-group">
           <div class="metric">
             <span class="metric-label">Thời gian xử lí</span>
-            <span class="metric-value mono" id="perfTime">-</span>
+            <span class="metric-value" id="perfTime">-</span>
           </div>
           <div class="metric">
             <span class="metric-label">Bộ nhớ sử dụng</span>
-            <span class="metric-value mono" id="perfMemory">-</span>
+            <span class="metric-value" id="perfMemory">-</span>
           </div>
         </div>
       </div>
@@ -647,14 +665,14 @@ details.anomaly-details[open] summary {
     <!-- Counters -->
     <div class="col-span-full" id="databaseStatsRow" style="display: none;">
       <div class="stat-grid">
-        <div class="stat-box"><span>Bản ghi</span><strong class="mono" id="records">0</strong></div>
-        <div class="stat-box"><span>Users</span><strong class="mono" id="users">0</strong></div>
-        <div class="stat-box"><span>Devices</span><strong class="mono" id="devices">0</strong></div>
-        <div class="stat-box"><span>Apps</span><strong class="mono" id="apps">0</strong></div>
-        <div class="stat-box"><span>Resources</span><strong class="mono" id="resources">0</strong></div>
-        <div class="stat-box"><span>Bị bỏ qua</span><strong class="mono" id="skipped">0</strong></div>
-        <div class="stat-box"><span>Đã thay thế</span><strong class="mono" id="replaced">0</strong></div>
-        <div class="stat-box"><span>Bản ghi trùng</span><strong class="mono" id="duplicates">0</strong></div>
+        <div class="stat-box"><span>Bản ghi</span><strong id="records">0</strong></div>
+        <div class="stat-box"><span>Users</span><strong id="users">0</strong></div>
+        <div class="stat-box"><span>Devices</span><strong id="devices">0</strong></div>
+        <div class="stat-box"><span>Apps</span><strong id="apps">0</strong></div>
+        <div class="stat-box"><span>Resources</span><strong id="resources">0</strong></div>
+        <div class="stat-box"><span>Bị bỏ qua</span><strong id="skipped">0</strong></div>
+        <div class="stat-box"><span>Đã thay thế</span><strong id="replaced">0</strong></div>
+        <div class="stat-box"><span>Bản ghi trùng</span><strong id="duplicates">0</strong></div>
       </div>
     </div>
   </section>
@@ -824,7 +842,7 @@ details.anomaly-details[open] summary {
                 </label>
                 <label class="radio-label">
                   <input type="radio" name="output" value="file">
-                  Ghi file .txt
+                  Ghi file .jsonl
                 </label>
               </div>
             </div>
@@ -851,7 +869,15 @@ details.anomaly-details[open] summary {
         <span class="mono" style="color: var(--text-muted); font-size: 14px;" id="resultsMeta">0 kết quả</span>
       </div>
       <div class="table-wrapper" id="resultsBody">
-        <div class="empty-state">Kết quả sẽ hiển thị ở đây.</div>
+        <div class="empty-state premium-empty" style="padding: 80px 20px; background: #fafafa; border-radius: 16px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px dashed #e2e8f0; margin: 24px 0; text-align: center;">
+  <div style="width: 80px; height: 80px; background: #f1f5f9; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-bottom: 24px;">
+    <svg style="width: 40px; height: 40px; color: #94a3b8;" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path>
+    </svg>
+  </div>
+  <div style="font-size: 18px; font-weight: 700; color: #334155; margin-bottom: 8px;">Kết quả phân tích sẽ xuất hiện ở đây</div>
+  <div style="font-size: 14px; color: #64748b; max-width: 320px; line-height: 1.5;">Chọn thuật toán, thiết lập tham số và bấm "Bắt đầu phân tích" để quét dữ liệu.</div>
+</div>
       </div>
     </div>
   </section>
@@ -996,6 +1022,25 @@ const anomalyCatalog = {
       n: { label: "Số khoảng cách nhanh liên tiếp (N)", desc: "Số lần lặp tối thiểu để xác nhận bot/script.", placeholder: "Ví dụ: 5", default: 5, min: 1 }
     }
   },
+  D11: {
+    category: "advanced",
+    name: "Quét resource tuần tự",
+    detail: "Phát hiện một thiết bị truy cập các resource có mã tăng liên tiếp, ví dụ R00001 → R00002 → R00003 (Không nhất thiết phải bắt đầu từ giá trị 1). Cảnh báo được kích hoạt khi chuỗi tuần tự này bao phủ ít nhất N% tổng số resource; đặt 100% để bắt trường hợp quét toàn bộ resource theo thứ tự.",
+    fields: ["coveragePercent"],
+    fieldsDetail: {
+      coveragePercent: { label: "Tỷ lệ resource cần bao phủ (%)", desc: "Phần trăm tổng số resource mà chuỗi truy cập tuần tự phải đạt tới trước khi báo bất thường.", placeholder: "Ví dụ: 80", default: 80, min: 1, max: 100 }
+    }
+  },
+  E1: {
+    category: "advanced",
+    name: "Phiên truy cập siêu ngắn",
+    detail: "Phát hiện người dùng lặp lại hành vi đăng nhập, thao tác dữ liệu (như truy cập hoặc tải xuống) và đăng xuất ngay lập tức trong một khoảng thời gian cực ngắn. Đây thường là dấu hiệu của các kịch bản tự động cào dữ liệu được lập trình nhằm lẩn tránh các quy tắc kiểm tra thời lượng phiên làm việc thông thường.",
+    fields: ["maxDurationSec", "n"],
+    fieldsDetail: {
+      maxDurationSec: { label: "Khoảng thời gian tối đa (giây)", desc: "Giới hạn thời gian tối đa từ lúc LOGIN đến LOGOUT để bị coi là phiên siêu ngắn.", placeholder: "Ví dụ: 5", default: 5, min: 1 },
+      n: { label: "Số phiên siêu ngắn tối thiểu (N)", desc: "Số lần người dùng thực hiện hành vi này để hệ thống bắt đầu cảnh báo.", placeholder: "Ví dụ: 3", default: 3, min: 1 }
+    }
+  },
   D8: {
     category: "advanced",
     name: "Robot timing",
@@ -1003,7 +1048,7 @@ const anomalyCatalog = {
     fields: ["minEvents", "maxCvPercent"],
     fieldsDetail: {
       minEvents: { label: "Số thao tác tối thiểu trong ngày", desc: "Không đánh giá nếu người dùng có quá ít thao tác để kết luận.", placeholder: "Ví dụ: 6", default: 6, min: 3 },
-      maxCvPercent: { label: "Độ sai lệch thời gian (%)", desc: "Mức độ chênh lệch thời gian giữa các lần bấm. Nếu người dùng thao tác quá đều đặn (sai số thấp hơn ngưỡng này), hệ thống sẽ nhận diện đó là Tool/Bot tự động.", placeholder: "Ví dụ: 10", default: 10, min: 0, max: 100 }
+      maxCvPercent: { label: "Độ sai lệch thời gian (%)", desc: "Mức độ chênh lệch thời gian (Hệ số biến thiên - CV) giữa các lần thao tác. CV càng thấp tức là thao tác càng đều đặn (giống máy móc). Nếu CV thấp hơn ngưỡng này (sai số thấp hơn ngưỡng này), hệ thống sẽ nhận diện đó là Tool/Bot tự động.", placeholder: "Ví dụ: 10", default: 10, min: 0, max: 100 }
     }
   },
   D10: {
@@ -1129,7 +1174,15 @@ async function selectWorkspace(file) {
     $("tabsHeader").style.display = "flex";
     $("workspaceContents").style.display = "block";
     $("resultsSection").style.display = "block";
-    $("resultsBody").innerHTML = '<div class="empty">Đã chuyển sang workspace: ' + esc(file) + '. Hãy chọn và chạy một truy vấn bên dưới.</div>';
+    $("resultsBody").innerHTML = `<div class="empty-state premium-empty" style="padding: 80px 20px; background: #fafafa; border-radius: 16px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px dashed #e2e8f0; margin: 24px 0; text-align: center;">
+  <div style="width: 80px; height: 80px; background: #f1f5f9; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-bottom: 24px;">
+    <svg style="width: 40px; height: 40px; color: #94a3b8;" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path>
+    </svg>
+  </div>
+  <div style="font-size: 18px; font-weight: 700; color: #334155; margin-bottom: 8px;">Đã kích hoạt <span style="color:var(--accent);">${esc(file)}</span></div>
+  <div style="font-size: 14px; color: #64748b; max-width: 320px; line-height: 1.5;">Vui lòng chọn thuật toán bất thường hoặc truy vấn bên trên để xem kết quả.</div>
+</div>`;
 
     toast("Đã kích hoạt workspace: " + file);
   } catch (e) {
@@ -1214,7 +1267,15 @@ async function loadDataset() {
 
     $("resultsTitle").textContent = "Workspace: " + file;
     $("resultsMeta").textContent = number(d.stats.records) + " bản ghi";
-    $("resultsBody").innerHTML = "<div class=\"empty\">Nạp dataset thành công. Vui lòng thực hiện truy vấn ở phía trên.</div>";
+    $("resultsBody").innerHTML = `<div class="empty-state premium-empty" style="padding: 80px 20px; background: #fafafa; border-radius: 16px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px dashed #e2e8f0; margin: 24px 0; text-align: center;">
+  <div style="width: 80px; height: 80px; background: #ecfdf5; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-bottom: 24px; color: #10b981;">
+    <svg style="width: 40px; height: 40px;" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+    </svg>
+  </div>
+  <div style="font-size: 18px; font-weight: 700; color: #334155; margin-bottom: 8px;">Nạp dữ liệu thành công!</div>
+  <div style="font-size: 14px; color: #64748b; max-width: 320px; line-height: 1.5;">Hệ thống đã nạp ${file} vào RAM. Hãy bắt đầu chọn truy vấn hoặc phân tích bất thường ở bên trên.</div>
+</div>`;
 
     toast("Đã nạp thành công workspace: " + file);
     await refreshLoadedWorkspaces();
@@ -1251,7 +1312,15 @@ function renderTable(title, meta, cols, rows) {
   $("resultsTitle").textContent = title;
   $("resultsMeta").textContent = meta;
   if (!rows || !rows.length) {
-    $("resultsBody").innerHTML = '<div class="empty">Không tìm thấy bản ghi phù hợp với điều kiện truy vấn.</div>';
+    $("resultsBody").innerHTML = `<div class="empty-state premium-empty" style="padding: 80px 20px; background: linear-gradient(180deg, rgba(248,250,252,0) 0%, rgba(238,242,255,0.5) 100%); border-radius: 16px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px dashed #cbd5e1; margin: 24px 0; text-align: center; box-shadow: inset 0 2px 10px rgba(0,0,0,0.01);">
+  <div style="width: 80px; height: 80px; background: #e0e7ff; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-bottom: 24px; box-shadow: 0 8px 24px rgba(79, 70, 229, 0.15); animation: float 3s ease-in-out infinite;">
+    <svg style="width: 40px; height: 40px; color: #4f46e5;" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+    </svg>
+  </div>
+  <div style="font-size: 18px; font-weight: 700; color: #1e293b; margin-bottom: 8px;">Không tìm thấy bản ghi nào</div>
+  <div style="font-size: 14px; color: #64748b; max-width: 320px; line-height: 1.5;">Hệ thống không tìm thấy dấu vết bất thường nào khớp với điều kiện lọc của bạn. Thử nới lỏng tham số xem sao nhé!</div>
+</div>`;
     return;
   }
 
@@ -1731,6 +1800,52 @@ function parseAnomalyLog(text) {
 }
 
 // Load and show content of previous report files
+
+async function viewHistoryText(file, ev) {
+  ev.stopPropagation();
+  const btn = ev.target;
+  const oldText = btn.textContent;
+  btn.textContent = "Đang nạp...";
+  try {
+    const d = await api("/api/get-anomaly-file-content?file=" + encodeURIComponent(file.filename));
+    const lines = d.content.trim().split("\n");
+    let out = "BÁO CÁO BẤT THƯỜNG\n";
+    out += "File: " + file.filename + "\n";
+    out += "--------------------------------------------------\n\n";
+    for (const line of lines) {
+      if (!line.trim() || line.startsWith("#")) continue;
+      try {
+        const row = JSON.parse(line);
+        out += `Sự kiện: ${row.type} - Cấp độ: ${row.severity}\n`;
+        out += `Thời gian: ${row.timestampUtc} -> ${row.endTimestampUtc}\n`;
+        out += `Người dùng: ${row.user}\n`;
+        out += `Lý do: ${row.reason}\n`;
+        out += `Số lượng bằng chứng: ${row.records ? row.records.length : 0}\n`;
+        if (row.records && row.records.length > 0) {
+            out += `Các bằng chứng chi tiết:\n`;
+            for (const r of row.records) {
+                out += `  - [${r.timestampUtc}] ${r.eventType} tại ${r.resource} (Device: ${r.device}, Location: ${r.location})\n`;
+            }
+        }
+        out += "\n--------------------------------------------------\n\n";
+      } catch (e) {
+        out += line + "\n";
+      }
+    }
+
+    $("resultsTitle").textContent = "Chi tiết Text: " + file.filename;
+    $("resultsMeta").textContent = "";
+    $("resultsSection").style.display = "block";
+    $("resultsBody").innerHTML = `<div style="padding: 16px; max-height: 600px; overflow-y: auto; background: #1e293b; color: #f8fafc; border-radius: 8px; font-family: var(--font-mono); font-size: 13px; line-height: 1.5; white-space: pre-wrap;">${esc(out)}</div>`;
+
+    $("resultsSection").scrollIntoView();
+  } catch (e) {
+    toast("Không thể đọc file: " + e.message, true);
+  } finally {
+    btn.textContent = oldText;
+  }
+}
+
 async function loadHistoryFile(file) {
   const filename = typeof file === "string" ? file : (file && file.filename) ? file.filename : "";
   document.querySelectorAll(".history-item").forEach(item => {
@@ -1821,6 +1936,7 @@ async function refreshHistoryList() {
           <div class="history-item-meta"><span>${esc(file.filename)}</span><span>${esc(sizeText)}</span></div>
           <div class="history-item-actions">
             <button class="history-delete-btn" type="button">Xóa</button>
+            <button class="history-view-text-btn" type="button" style="margin-left:auto; font-size: 11px; color: var(--accent); padding: 4px 8px; border-radius: 6px; background: #f1f5f9; border: 1px solid #cbd5e1; cursor: pointer;">Xem dạng Text</button>
           </div>
         `;
 

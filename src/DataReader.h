@@ -7,7 +7,9 @@
 
 #include "Halo.h"
 
-class Win32LineReader;
+namespace platform {
+class LineReader;
+}
 
 class DataReader {
    private:
@@ -33,7 +35,7 @@ class DataReader {
     void parseLineToRow(std::string_view line, ParsedCsvRow& parsed) const;
     bool commitParsedRow(Halo& engine, const ParsedCsvRow& parsed);
     bool processLine(Halo& engine, std::string_view line);
-    bool readSomeParallel(Halo& engine, Win32LineReader& file, int maxRows,
+    bool readSomeParallel(Halo& engine, platform::LineReader& file, int maxRows,
                           uint64_t fileSize, long long& nextOffset,
                           int& acceptedRows);
 

@@ -1,49 +1,80 @@
-# HALO Endterm
+# Cách chạy chương trình
+## Bước 1: **Tạo thư mục `data`** và chuẩn bị dữ liệu
 
-## Data
-
-Dat cac file `.csv` vao `data/`.
-
-```text
-data/
-  halo_dataset_1m.csv
-  halo_dataset_1_5m.csv
+```cmd
+mkdir data
 ```
 
-## Windows
+## Bước 2: **Chuẩn bị dữ liệu**: Sao chép các file dữ liệu cần thiết vào thư mục `data/` (định dạng .csv).
 
+## Bước 3: Chuẩn bị và biên dịch
+## A. Windows
+### Build (có thể bỏ qua)
 ```powershell
-g++ -O2 -DNDEBUG -ffunction-sections -fdata-sections "-Wl,--gc-sections" -s -std=c++23 src\*.cpp -o release\24120117.exe -lws2_32 -lpsapi
+g++ -O2 -DNDEBUG -Wall -Wextra -flto=auto -ffunction-sections -fdata-sections "-Wl,--gc-sections" -s -std=c++23 src\*.cpp -o release\24120117.exe -lws2_32 -lpsapi
+```
+
+### Chạy
+```powershell
 .\release\24120117.exe
 ```
 
-Mo trinh duyet tai:
+Sau đó mở port (Mặc định) như sau:
 
 ```text
 http://localhost:24117
 ```
 
-Chon file trong `data/`, bam `Load dataset`, roi dung 3 query hoac phan phat hien bat thuong.
+### Đổi port
+Khi chạy chương trình có thể đổi port mong muốn như sau (ví dụ đổi thành port 3000):
+```powershell
+.\release\24120117.exe 3000
+.\release\24120117.exe --port=3000
+$env:HALO_PORT="3000"; .\release\24120117.exe
+```
 
-## Linux
+Sau đó mở port (Ví dụ port 3000):
+```text
+http://localhost:3000
+```
 
-Backend native Linux chua hoan chinh. Ke hoach port nam o `POSIX_PORT_PLAN.md`.
-
-Sau khi port xong:
+## B. Linux
+### Build (có thể bỏ qua)
+Build bằng Makefile
 
 ```bash
 make linux
-./release/halo
 ```
 
-## Test
+Hoặc
 
+```bash
+mkdir -p release
+g++ -O2 -DNDEBUG -Wall -Wextra -flto=auto -ffunction-sections -fdata-sections "-Wl,--gc-sections" -s -std=c++23 src\*.cpp -o release\24120117.exe -lws2_32 -lpsapi
+```
+
+### Chạy
+
+```bash
+./release/24120117.exe
+```
+
+Mở port
+
+```text
+http://localhost:24117
+```
+
+### Đổi port
+
+Khi chạy chương trình có thể đổi port mong muốn như sau (ví dụ đổi thành port 3000):
 ```powershell
-g++ -O2 -Wall -Wextra -std=c++23 -Isrc tests\anomaly_tests.cpp src\Halo.cpp src\RecordStorage.cpp src\idTable.cpp src\HashTable.cpp src\Platform.cpp -o release\anomaly_tests.exe -lpsapi
-.\release\anomaly_tests.exe
+.\release\24120117.exe 3000
+.\release\24120117.exe --port=3000
+$env:HALO_PORT="3000"; .\release\24120117.exe
+```
 
-g++ -O2 -DNDEBUG -Wall -std=c++23 -Isrc tests\parser_tests.cpp -o release\parser_tests.exe
-.\release\parser_tests.exe
-
-powershell -ExecutionPolicy Bypass -File tests\api_smoke.ps1
+Sau đó mở:
+```text
+http://localhost:3000
 ```

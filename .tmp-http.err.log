@@ -1,6 +1,0 @@
-::ffff:127.0.0.1 - - [16/Jun/2026 13:39:54] "GET /index.html HTTP/1.1" 200 -
-::ffff:127.0.0.1 - - [16/Jun/2026 13:40:11] "GET /index.html HTTP/1.1" 200 -
-::ffff:127.0.0.1 - - [16/Jun/2026 13:40:11] code 404, message File not found
-::ffff:127.0.0.1 - - [16/Jun/2026 13:40:11] code 404, message File not found
-::ffff:127.0.0.1 - - [16/Jun/2026 13:40:11] "GET /api/list-datasets HTTP/1.1" 404 -
-::ffff:127.0.0.1 - - [16/Jun/2026 13:40:11] "GET /api/list-loaded HTTP/1.1" 404 -
